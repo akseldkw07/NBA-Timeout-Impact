@@ -107,7 +107,7 @@ def load_season(
 
 def load_seasons(
     data_type: DATA_SRC_TYPE = "nbastats",
-    seasons: int | t.Sequence[int] | None = None,
+    seasons: int | t.Sequence[int] | None = -5,  # default to last 5 seasons if None
     playoffs: bool = False,
     skip_missing: bool = False,
 ) -> pd.DataFrame:
@@ -138,8 +138,18 @@ def load_seasons(
                 f"Expected files in: {NBA_DATA_DIR}"
             )
     elif isinstance(seasons, int):
-        seasons = [seasons]
+        if seasons < 0:
+            all_seasons = available_seasons(data_type, playoffs)
+            if not all_seasons:
+                raise FileNotFoundError(
+                    f"No local files found for data_type='{data_type}', playoffs={playoffs}.\n"
+                    f"Expected files in: {NBA_DATA_DIR}"
+                )
+            seasons = sorted(all_seasons)[seasons:]  # get last N seasons
+        else:
+            seasons = [seasons]
 
+    print(f"Loading data_type='{data_type}', seasons={list(seasons)}, playoffs={playoffs}...")
     frames = []
     for s in seasons:
         if skip_missing and not _tar_path(data_type, s, playoffs).exists():
