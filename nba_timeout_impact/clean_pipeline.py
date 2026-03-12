@@ -15,13 +15,12 @@ Usage
     pipeline.save(clean, path / "nbastatsv3_clean.parquet")
 """
 
+import typing as t
 from pathlib import Path
 
 import pandas as pd
-
 from kret_sklearn.custom_transformers import PandasColumnOrderBase
 from kret_sklearn.pd_pipeline import PipelinePD
-import typing as t
 
 # ---------------------------------------------------------------------------
 # Transformers
@@ -49,10 +48,11 @@ class NBAStatsV3ClockParser(PandasColumnOrderBase):
 
     seconds_remaining  – time left in the period
     seconds_elapsed    – time played so far in the period
-                         (300 s for regulation quarters, 300 s for OT)
+                         (720 s for regulation quarters, 300 s for OT)
     """
 
-    PERIOD_LENGTH = 300  # seconds (5 minutes)
+    REG_PERIOD_SECS = 720  # 12 minutes
+    OT_PERIOD_SECS = 300  # 5 minutes
 
     def _fit(self, X: pd.DataFrame, y=None) -> "NBAStatsV3ClockParser":
         assert "clock" in X.columns, "Expected a 'clock' column in the DataFrame."
@@ -65,8 +65,9 @@ class NBAStatsV3ClockParser(PandasColumnOrderBase):
         return parsed[0] * 60 + parsed[1]
 
     def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        period_len = X["period"].apply(lambda p: self.REG_PERIOD_SECS if p <= 4 else self.OT_PERIOD_SECS)
         X["seconds_remaining"] = self._parse_clock(X["clock"])
-        X["seconds_elapsed"] = self.PERIOD_LENGTH - X["seconds_remaining"]
+        X["seconds_elapsed"] = period_len - X["seconds_remaining"]
         self.new_columns = list(X.columns)
         return X
 

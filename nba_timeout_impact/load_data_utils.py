@@ -35,10 +35,11 @@ EVENTMSGTYPE reference (nbastats)
 18 Instant replay
 """
 
-from pathlib import Path
 import tarfile
-import pandas as pd
 import typing as t
+from pathlib import Path
+
+import pandas as pd
 
 
 # Resolve paths whether running on Mac or in the Cowork VM
