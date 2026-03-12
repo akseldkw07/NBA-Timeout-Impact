@@ -105,7 +105,7 @@ class NBAStatsV3CleanPipeline:
     @staticmethod
     def save(
         df: pd.DataFrame,
-        path: "Path | str",
+        path: Path | str,
         compression: t.Literal["snappy", "gzip", "brotli", "lz4", "zstd"] = "snappy",
     ) -> Path:
         """Save cleaned DataFrame to parquet. Returns the resolved path."""

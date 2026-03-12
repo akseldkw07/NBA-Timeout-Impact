@@ -27,7 +27,7 @@ EVENTMSGTYPE reference (nbastats)
 6  Foul
 7  Violation
 8  Substitution
-9  Timeout  ← key event for this project
+9  Timeout  <- key event for this project
 10 Jump ball
 11 Ejection
 12 Start of period
@@ -41,147 +41,232 @@ from pathlib import Path
 
 import pandas as pd
 
+DATA_SRC_TYPE = t.Literal["nbastats", "nbastatsv3", "datanba", "pbpstats", "shotdetail", "cdnnba", "matchups"]
+SeasonsArg = int | t.Sequence[int] | None
 
-# Resolve paths whether running on Mac or in the Cowork VM
+
 def _resolve_columbia_dir() -> Path:
-    candidates = [
-        Path("/Users/Akseldkw/coding/Columbia"),  # Mac
-        Path("/sessions/busy-determined-hypatia/mnt/Columbia"),  # Cowork VM
-    ]
-    for p in candidates:
+    for p in (
+        Path("/Users/Akseldkw/coding/Columbia"),
+        Path("/sessions/busy-determined-hypatia/mnt/Columbia"),
+    ):
         if p.exists():
             return p
-    raise RuntimeError(
-        "Cannot find Columbia directory. " "Expected at /Users/Akseldkw/coding/Columbia or the Cowork VM mount."
-    )
+    raise RuntimeError("Cannot find Columbia directory.")
 
 
-_COLUMBIA = _resolve_columbia_dir()
-NBA_DATA_DIR = _COLUMBIA / "nba_data" / "datasets"
-NBA_ON_COURT_DIR = _COLUMBIA / "nba-on-court"
-DATA_SRC_TYPE = t.Literal["nbastats", "nbastatsv3", "datanba", "pbpstats", "shotdetail", "cdnnba", "matchups"]
-
-
-def _tar_path(data_type: str, season: int, playoffs: bool = False) -> Path:
-    if playoffs:
-        name = f"{data_type}_po_{season}.tar.xz"
-    else:
-        name = f"{data_type}_{season}.tar.xz"
-    return NBA_DATA_DIR / name
-
-
-def load_season(
-    data_type: DATA_SRC_TYPE = "nbastats",
-    season: int = 2022,
-    playoffs: bool = False,
-) -> pd.DataFrame:
+class NBADataLoader:
     """
-    Load a single season of NBA play-by-play data from the local archive.
+    Loads NBA play-by-play data from the local nba_data archive.
 
-    Parameters
-    ----------
-    data_type : str
-        One of 'nbastats', 'nbastatsv3', 'datanba', 'pbpstats',
-        'shotdetail', 'cdnnba', 'matchups'.
-    season : int
-        The year the season *started* (e.g. 2022 = 2022-23 season).
-    playoffs : bool
-        If True, load playoff data instead of regular season.
+    All methods are classmethods — no instantiation needed:
 
-    Returns
-    -------
-    pd.DataFrame
+        from nba_timeout_impact.load_data_utils import NBADataLoader as NBA
+
+        df    = NBA.load_seasons("nbastats", seasons=2022)
+        dates = NBA.load_game_dates(seasons=2022)
+        avail = NBA.available_seasons("nbastats")
     """
-    path = _tar_path(data_type, season, playoffs)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Dataset not found: {path}\n" f"Available files: {sorted(NBA_DATA_DIR.glob(f'{data_type}_*.tar.xz'))}"
-        )
-    csv_name = path.stem.replace(".tar", "") + ".csv"  # strip .tar from stem
-    # stem of "nbastats_2022.tar.xz" is "nbastats_2022.tar", so:
-    csv_name = path.name.replace(".tar.xz", ".csv")
-    with tarfile.open(path, "r:xz") as tar:
-        f = tar.extractfile(csv_name)
-        assert f is not None, f"CSV file {csv_name} not found in archive {path}"
-        return pd.read_csv(f)
 
+    _COLUMBIA: t.ClassVar[Path] = _resolve_columbia_dir()
+    DATA_DIR: t.ClassVar[Path] = _COLUMBIA / "nba_data" / "datasets"
+    ON_COURT_DIR: t.ClassVar[Path] = _COLUMBIA / "nba-on-court"
 
-def load_seasons(
-    data_type: DATA_SRC_TYPE = "nbastats",
-    seasons: int | t.Sequence[int] | None = -5,  # default to last 5 seasons if None
-    playoffs: bool = False,
-    skip_missing: bool = False,
-) -> pd.DataFrame:
-    """Load and concatenate multiple seasons into one DataFrame.
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
-    Parameters
-    ----------
-    data_type : str
-        Dataset type (e.g. 'nbastats', 'cdnnba', 'datanba', ...).
-    seasons : int, sequence of int, or None
-        Seasons to load. If None (default), automatically loads all
-        locally available seasons for the given data_type and playoffs flag.
-    playoffs : bool
-        If True, load playoff data instead of regular season.
-    skip_missing : bool
-        If True, silently skip seasons whose files don't exist rather than
-        raising FileNotFoundError. Useful when passing a broad range.
+    @classmethod
+    def _tar_path(cls, data_type: str, season: int, playoffs: bool = False) -> Path:
+        suffix = f"_po_{season}" if playoffs else f"_{season}"
+        return cls.DATA_DIR / f"{data_type}{suffix}.tar.xz"
 
-    Returns
-    -------
-    pd.DataFrame
-    """
-    if seasons is None:
-        seasons = available_seasons(data_type, playoffs)
-        if not seasons:
-            raise FileNotFoundError(
-                f"No local files found for data_type='{data_type}', playoffs={playoffs}.\n"
-                f"Expected files in: {NBA_DATA_DIR}"
-            )
-    elif isinstance(seasons, int):
-        if seasons < 0:
-            all_seasons = available_seasons(data_type, playoffs)
-            if not all_seasons:
+    @classmethod
+    def _resolve_seasons(
+        cls,
+        data_type: DATA_SRC_TYPE,
+        seasons: SeasonsArg,
+        playoffs: bool,
+    ) -> list[int]:
+        """Normalise the ``seasons`` argument to a concrete list of ints."""
+        if seasons is None:
+            result = cls.available_seasons(data_type, playoffs)
+            if not result:
                 raise FileNotFoundError(
-                    f"No local files found for data_type='{data_type}', playoffs={playoffs}.\n"
-                    f"Expected files in: {NBA_DATA_DIR}"
+                    f"No local files found for data_type='{data_type}', playoffs={playoffs}. "
+                    f"Expected files in: {cls.DATA_DIR}"
                 )
-            seasons = sorted(all_seasons)[seasons:]  # get last N seasons
-        else:
-            seasons = [seasons]
+            return result
+        if isinstance(seasons, int):
+            if seasons < 0:
+                all_s = cls.available_seasons(data_type, playoffs)
+                return sorted(all_s)[seasons:]  # last N seasons
+            return [seasons]
+        return list(seasons)
 
-    print(f"Loading data_type='{data_type}', seasons={list(seasons)}, playoffs={playoffs}...")
-    frames = []
-    for s in seasons:
-        if skip_missing and not _tar_path(data_type, s, playoffs).exists():
-            continue
-        frames.append(load_season(data_type, s, playoffs))
+    @staticmethod
+    def _read_tar_csv(path: Path, **read_csv_kwargs) -> pd.DataFrame:
+        csv_name = path.name.replace(".tar.xz", ".csv")
+        with tarfile.open(path, "r:xz") as tar:
+            f = tar.extractfile(csv_name)
+            assert f is not None, f"CSV {csv_name} not found in {path}"
+            return pd.read_csv(f, **read_csv_kwargs)
 
-    if not frames:
-        raise ValueError(f"No data loaded for data_type='{data_type}', seasons={list(seasons)}, playoffs={playoffs}.")
-    return pd.concat(frames, ignore_index=True)
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
+    @classmethod
+    def available_seasons(cls, data_type: DATA_SRC_TYPE = "nbastats", playoffs: bool = False) -> list[int]:
+        """Return sorted list of locally available seasons for a given data type."""
+        prefix = f"{data_type}_po_" if playoffs else f"{data_type}_"
+        pattern = f"{data_type}_po_*.tar.xz" if playoffs else f"{data_type}_[0-9]*.tar.xz"
+        seasons = []
+        for f in sorted(cls.DATA_DIR.glob(pattern)):
+            stem = f.name.replace(".tar.xz", "")
+            try:
+                seasons.append(int(stem.replace(prefix, "")))
+            except ValueError:
+                pass
+        return seasons
 
-def get_timeouts(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter play-by-play DataFrame to timeout events only (EVENTMSGTYPE == 9)."""
-    return df[df["EVENTMSGTYPE"] == 9].copy()
+    @classmethod
+    def load_season(
+        cls,
+        data_type: DATA_SRC_TYPE = "nbastats",
+        season: int = 2022,
+        playoffs: bool = False,
+    ) -> pd.DataFrame:
+        """Load a single season from the local archive.
 
+        Parameters
+        ----------
+        data_type : str
+            One of 'nbastats', 'nbastatsv3', 'datanba', 'pbpstats',
+            'shotdetail', 'cdnnba', 'matchups'.
+        season : int
+            The year the season started (e.g. 2022 = 2022-23 season).
+        playoffs : bool
+            If True, load playoff data instead of regular season.
+        """
+        path = cls._tar_path(data_type, season, playoffs)
+        if not path.exists():
+            available = sorted(cls.DATA_DIR.glob(f"{data_type}_*.tar.xz"))
+            raise FileNotFoundError(f"Dataset not found: {path}\nAvailable: {available}")
+        return cls._read_tar_csv(path)
 
-def available_seasons(data_type: DATA_SRC_TYPE = "nbastats", playoffs: bool = False) -> list[int]:
-    """Return sorted list of locally available seasons for a given data type."""
-    if playoffs:
-        pattern = f"{data_type}_po_*.tar.xz"
-        prefix = f"{data_type}_po_"
-    else:
-        pattern = f"{data_type}_[0-9]*.tar.xz"
-        prefix = f"{data_type}_"
-    files = sorted(NBA_DATA_DIR.glob(pattern))
-    seasons = []
-    for f in files:
-        stem = f.name.replace(".tar.xz", "")
-        try:
-            year = int(stem.replace(prefix, ""))
-            seasons.append(year)
-        except ValueError:
-            pass
-    return seasons
+    @classmethod
+    def load_seasons(
+        cls,
+        data_type: DATA_SRC_TYPE = "nbastats",
+        seasons: SeasonsArg = None,
+        playoffs: bool = False,
+        skip_missing: bool = False,
+    ) -> pd.DataFrame:
+        """Load and concatenate multiple seasons into one DataFrame.
+
+        Parameters
+        ----------
+        data_type : str
+            Dataset type (e.g. 'nbastats', 'cdnnba', 'datanba', ...).
+        seasons : int, sequence of int, or None
+            Seasons to load. ``None`` loads all locally available seasons.
+            A negative int ``-N`` loads the last N available seasons.
+        playoffs : bool
+            If True, load playoff data instead of regular season.
+        skip_missing : bool
+            Silently skip seasons whose files don't exist.
+        """
+        season_list = cls._resolve_seasons(data_type, seasons, playoffs)
+        print(f"Loading data_type='{data_type}', seasons={season_list}, playoffs={playoffs}...")
+
+        frames = []
+        for s in season_list:
+            if skip_missing and not cls._tar_path(data_type, s, playoffs).exists():
+                continue
+            frames.append(cls.load_season(data_type, s, playoffs))
+
+        if not frames:
+            raise ValueError(f"No data loaded for data_type='{data_type}', seasons={season_list}, playoffs={playoffs}.")
+        return pd.concat(frames, ignore_index=True)
+
+    @classmethod
+    def load_game_dates(
+        cls,
+        seasons: SeasonsArg = None,
+        playoffs: bool | None = False,
+        skip_missing: bool = False,
+    ) -> pd.DataFrame:
+        """Return a GAME_ID -> game_date lookup table.
+
+        Sources used in priority order:
+        - pbpstats  (2000-2024): has a GAMEDATE column directly.
+        - datanba   (2016-2024): derives date from the wallclk UTC timestamp.
+
+        Parameters
+        ----------
+        seasons : int, sequence of int, or None
+            Seasons to include. ``None`` loads all pbpstats-available seasons.
+            A negative int ``-N`` loads the last N available seasons.
+        playoffs : bool or None
+            False = regular season only, True = playoffs only,
+            None  = both combined.
+        skip_missing : bool
+            Silently skip seasons with no local file rather than raising.
+
+        Returns
+        -------
+        pd.DataFrame with columns: GAME_ID (int), game_date (datetime.date)
+        """
+        base_playoffs = False if playoffs is None else bool(playoffs)
+        season_list = cls._resolve_seasons("pbpstats", seasons, base_playoffs)
+        season_types: list[bool] = [False, True] if playoffs is None else [bool(playoffs)]
+
+        frames: list[pd.DataFrame] = []
+
+        for stype in season_types:
+            for s in season_list:
+                # --- pbpstats: GAMEDATE column directly ---
+                pbp_path = cls._tar_path("pbpstats", s, stype)
+                if pbp_path.exists():
+                    chunk = cls._read_tar_csv(pbp_path, usecols=["GAMEID", "GAMEDATE"])
+                    chunk = (
+                        chunk.drop_duplicates("GAMEID")
+                        .rename(columns={"GAMEID": "GAME_ID", "GAMEDATE": "game_date"})
+                        .assign(game_date=lambda d: pd.to_datetime(d["game_date"]).dt.date)
+                    )
+                    frames.append(chunk)
+                    continue
+
+                # --- datanba fallback: parse wallclk ---
+                dn_path = cls._tar_path("datanba", s, stype)
+                if dn_path.exists():
+                    chunk = cls._read_tar_csv(dn_path, usecols=["GAME_ID", "wallclk"])
+                    chunk = (
+                        chunk.drop_duplicates("GAME_ID")
+                        .assign(game_date=lambda d: pd.to_datetime(d["wallclk"], format="ISO8601", utc=True).dt.date)
+                        .drop(columns="wallclk")
+                    )
+                    frames.append(chunk)
+                    continue
+
+                if not skip_missing:
+                    raise FileNotFoundError(
+                        f"No pbpstats or datanba file found for season={s}, playoffs={stype}. "
+                        f"Pass skip_missing=True to ignore missing seasons."
+                    )
+
+        if not frames:
+            raise ValueError(f"No game date data loaded for seasons={season_list}, playoffs={playoffs}.")
+
+        return (
+            pd.concat(frames, ignore_index=True)
+            .drop_duplicates("GAME_ID")
+            .sort_values("game_date")
+            .reset_index(drop=True)
+        )
+
+    @staticmethod
+    def get_timeouts(df: pd.DataFrame) -> pd.DataFrame:
+        """Filter a nbastats DataFrame to timeout events only (EVENTMSGTYPE == 9)."""
+        return df[df["EVENTMSGTYPE"] == 9].copy()
