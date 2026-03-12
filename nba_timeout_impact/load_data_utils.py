@@ -266,6 +266,88 @@ class NBADataLoader:
             .reset_index(drop=True)
         )
 
+    @classmethod
+    def load_game_dates_from_api(
+        cls,
+        seasons: SeasonsArg = None,
+        playoffs: bool = False,
+        sleep: float = 0.6,
+    ) -> pd.DataFrame:
+        """Fetch GAME_ID -> game_date via nba_api.LeagueGameLog.
+
+        Intended for seasons not covered by local files (i.e. 1996-1999),
+        but works for any season range. Requires a network connection to
+        stats.nba.com — run this on your Mac, not in the Cowork VM.
+
+        Results can be cached and merged into load_game_dates() output:
+
+            early = NBA.load_game_dates_from_api(seasons=[1996, 1997, 1998, 1999])
+            early.to_parquet(NBA.DATA_DIR / "game_dates_1996_1999.parquet", index=False)
+
+            # Later, merge with the local lookup:
+            dates = pd.concat([
+                NBA.load_game_dates(),
+                pd.read_parquet(NBA.DATA_DIR / "game_dates_1996_1999.parquet"),
+            ]).drop_duplicates("GAME_ID").sort_values("game_date").reset_index(drop=True)
+
+        Parameters
+        ----------
+        seasons : int, sequence of int, or None
+            Seasons to fetch. ``None`` fetches all seasons available in the
+            local nbastats files (since that is the play-by-play source).
+            A negative int ``-N`` fetches the last N available seasons.
+        playoffs : bool
+            False = Regular Season, True = Playoffs.
+        sleep : float
+            Seconds to wait between API calls to respect rate limits.
+            Default 0.6 s keeps well within stats.nba.com limits.
+
+        Returns
+        -------
+        pd.DataFrame with columns: GAME_ID (int), game_date (datetime.date)
+        """
+        import time
+        from nba_api.stats.endpoints import LeagueGameLog
+
+        SEASON_TYPE = {False: "Regular Season", True: "Playoffs"}
+
+        season_list = cls._resolve_seasons("nbastats", seasons, playoffs)
+
+        frames: list[pd.DataFrame] = []
+        for s in season_list:
+            # NBA season string format: "1996-97", "2022-23", etc.
+            season_str = f"{s}-{str(s + 1)[-2:]}"
+            print(f"  Fetching {season_str} ({SEASON_TYPE[playoffs]})...", end=" ", flush=True)
+            try:
+                log = LeagueGameLog(
+                    season=season_str,
+                    season_type_all_star=SEASON_TYPE[playoffs],
+                )
+                df = log.get_data_frames()[0][["GAME_ID", "GAME_DATE"]]
+                chunk = (
+                    df.drop_duplicates("GAME_ID")
+                    .rename(columns={"GAME_DATE": "game_date"})
+                    .assign(
+                        GAME_ID=lambda d: d["GAME_ID"].astype(int),
+                        game_date=lambda d: pd.to_datetime(d["game_date"]).dt.date,
+                    )
+                )
+                frames.append(chunk)
+                print(f"{len(chunk)} games")
+            except Exception as e:
+                print(f"FAILED ({e})")
+            time.sleep(sleep)
+
+        if not frames:
+            raise ValueError(f"No data fetched for seasons={season_list}, playoffs={playoffs}.")
+
+        return (
+            pd.concat(frames, ignore_index=True)
+            .drop_duplicates("GAME_ID")
+            .sort_values("game_date")
+            .reset_index(drop=True)
+        )
+
     @staticmethod
     def get_timeouts(df: pd.DataFrame) -> pd.DataFrame:
         """Filter a nbastats DataFrame to timeout events only (EVENTMSGTYPE == 9)."""

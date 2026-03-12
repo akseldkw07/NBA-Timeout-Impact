@@ -21,6 +21,8 @@ from pathlib import Path
 import pandas as pd
 from kret_sklearn.custom_transformers import PandasColumnOrderBase
 from kret_sklearn.pd_pipeline import PipelinePD
+from sklearn.preprocessing import FunctionTransformer
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # Transformers
@@ -31,7 +33,7 @@ class StripStringColumns(PandasColumnOrderBase):
     """Strip leading/trailing whitespace from every object/string column."""
 
     def _fit(self, X: pd.DataFrame, y=None) -> "StripStringColumns":
-        self._str_cols = [c for c in X.columns if X[c].dtype == object]
+        self._str_cols = X.select_dtypes(include=["str"]).columns.tolist()
         return self
 
     def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
@@ -65,9 +67,72 @@ class NBAStatsV3ClockParser(PandasColumnOrderBase):
         return parsed[0] * 60 + parsed[1]
 
     def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
-        period_len = X["period"].apply(lambda p: self.REG_PERIOD_SECS if p <= 4 else self.OT_PERIOD_SECS)
+        # period_len = X["period"].apply(lambda p: self.REG_PERIOD_SECS if p <= 4 else self.OT_PERIOD_SECS) # TOO SLOW
+        period_len = np.where(X["period"] <= 4, self.REG_PERIOD_SECS, self.OT_PERIOD_SECS)
         X["seconds_remaining"] = self._parse_clock(X["clock"])
         X["seconds_elapsed"] = period_len - X["seconds_remaining"]
+        self.new_columns = list(X.columns)
+        return X
+
+
+class MergeDateTime(PandasColumnOrderBase):
+    """
+    Load in date file, map dates to gameId, merge as new columns at the end of the DataFrame. This is a separate step because it requires an additional input file and is not strictly necessary for cleaning the raw data.
+    """
+
+    dates_df: pd.DataFrame
+    filename: str | Path
+
+    def __init__(self, filename: str | Path) -> None:
+        super().__init__()
+        self.filename = filename
+
+    def _fit(self, X: pd.DataFrame, y=None):
+        self.dates_df = pd.read_parquet(self.filename)
+        return self
+
+    def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+
+        game_date_map = self.dates_df.set_index("GAME_ID")["game_date"]
+        X["game_date"] = pd.to_datetime(X["gameId"].map(game_date_map))
+        X["game_date_ffill"] = X["game_date"].ffill()
+
+        self.new_columns = list(X.columns)
+        return X
+
+
+class CategoricalConversion(PandasColumnOrderBase):
+    cols: list[str]
+
+    def __init__(self, cols: list[str]) -> None:
+        self.cols = cols
+
+    def _fit(self, X: pd.DataFrame, y=None) -> "CategoricalConversion":
+        for col in self.cols:
+            assert col in X.columns, f"Expected column '{col}' not found in DataFrame."
+        return self
+
+    def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        for col in self.cols:
+            X[col] = pd.Categorical(X[col])
+        self.new_columns = list(X.columns)
+        return X
+
+
+class SortByDate(PandasColumnOrderBase):
+    sort_col = ["game_date_ffill", "gameId", "actionId"]
+
+    def _fit(self, X: pd.DataFrame, y=None) -> "SortByDate":
+        assert all(
+            col in X.columns for col in self.sort_col
+        ), f"Expected columns {self.sort_col} not found in DataFrame."
+        assert all(
+            X[col].isna().sum() == 0 for col in self.sort_col
+        ), f"Expected no missing values in sort columns {self.sort_col}."
+        return self
+
+    def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        X = X.sort_values(self.sort_col, ascending=[True, True, True]).reset_index(drop=True)
         self.new_columns = list(X.columns)
         return X
 
@@ -88,19 +153,39 @@ class NBAStatsV3CleanPipeline:
     save(df, path)             – save cleaned DataFrame to parquet
     """
 
-    def __init__(self) -> None:
-        self._pipeline = PipelinePD(
-            steps=[
-                ("strip_strings", StripStringColumns()),
-                ("parse_clock", NBAStatsV3ClockParser()),
+    path_root: Path
+
+    def __init__(self, path: str | Path) -> None:
+        self.path_root = Path(path)
+        df_load = FunctionTransformer(func=pd.read_parquet, validate=False, kw_args={})
+        cats = CategoricalConversion(
+            cols=[
+                "actionType",
+                "playerName",
+                "playerNameI",
+                "teamTricode",
+                "subType",
+                "location",
+                "shotResult",
+                "teamId",
+                "shotResult",
             ]
         )
 
-    def fit_transform_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._pipeline.fit_transform_df(df)
+        self._pipeline = PipelinePD(
+            steps=[
+                ("load_df", df_load),
+                ("strip_strings", StripStringColumns()),
+                ("parse_clock", NBAStatsV3ClockParser()),
+                ("merge_datetime", MergeDateTime(self.path_root / "nba_game_dates.parquet")),
+                ("cats", cats),
+                ("sort", SortByDate()),
+            ]
+        )
 
-    def transform_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._pipeline.transform_df(df)
+    def run(self) -> pd.DataFrame:
+        path = self.path_root / "nba_statsv3.parquet"
+        return self._pipeline.fit_transform_df(path)
 
     @staticmethod
     def save(
