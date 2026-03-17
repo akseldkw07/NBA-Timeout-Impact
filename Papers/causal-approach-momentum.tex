@@ -1,0 +1,268 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.5in]{geometry}
+
+\newcommand{\duedate}{}
+\newcommand{\assignment}{Summary of Weimer et al. (2023)}
+
+\newcommand{\name}{Aksel Kretsinger-Walters, adk2164}
+\newcommand{\email}{adk2164@columbia.edu}
+
+\makeatletter
+\def\input@path{{../}{../../}{../../../}}
+\makeatother
+\input{pset_template_6873.tex}
+
+\begin{document}
+\psetheader
+
+\section*{Weimer et al. (2023): A Causal Approach for Detecting Team-Level Momentum in NBA Games}
+
+\subsection*{1. Research Question}
+
+Does \textbf{team-level momentum} exist in basketball?
+
+Momentum hypothesis:
+\[
+		P(\text{score next possession} \mid \text{recent scoring run})
+		>
+		P(\text{score next possession})
+\]
+
+Traditional skepticism:
+\begin{itemize}
+		\item Many studies treat scoring as independent events.
+		\item Momentum often attributed to cognitive bias (``hot hand illusion'').
+\end{itemize}
+
+This paper tests whether \textbf{timeouts interrupt momentum}.
+If pauses reduce scoring by the momentum team, momentum must exist.
+
+\bigskip
+Key idea:
+
+\[
+		\text{If momentum does not exist} \Rightarrow \text{timeouts should not affect scoring}.
+\]
+
+\subsection*{2. Causal Identification Strategy}
+
+Problem:
+\begin{itemize}
+		\item Coaches call timeouts strategically.
+		\item Strategic timeouts introduce \textbf{selection bias}.
+\end{itemize}
+
+Solution: Use \textbf{TV timeouts}.
+
+TV timeouts are:
+\[
+		\text{exogenous stoppages of play}
+\]
+
+They occur at predetermined times in the NBA rulebook and are unrelated to momentum.
+
+Thus:
+
+\[
+		\text{TV timeout} \approx \text{random assignment of pause in play}
+\]
+
+This approximates a randomized experiment.
+
+\subsection*{3. Matching Framework}
+
+Goal: Compare runs that are identical except for the presence of a TV timeout.
+
+Matching variables:
+\begin{itemize}
+		\item run length
+		\item substitutions by momentum team
+		\item substitutions by opposing team
+\end{itemize}
+
+Propensity score matching:
+
+\[
+		Pr(Treatment_i = 1 \mid X_i)
+\]
+
+where
+
+\[
+		X_i = (\text{run size}, \text{substitutions})
+\]
+
+Each treated run (interrupted by TV timeout) is matched with a similar untreated run.
+
+\subsection*{4. Operational Definition of Momentum}
+
+Momentum indicator:
+
+\[
+		m_i =
+		\begin{cases}
+				1 & \text{if } p_u \ge 6 \\
+				0 & \text{otherwise}
+		\end{cases}
+\]
+
+where
+
+\[
+		p_u = \text{unanswered points}.
+\]
+
+Thus momentum begins when:
+
+\[
+		\text{run} \ge 6 \text{ points}.
+\]
+
+Robustness checks also test:
+
+\[
+		10 \text{ point runs}, \quad 15 \text{ point runs}.
+\]
+
+Outcome variable:
+
+\[
+		Y_i = \text{points scored by the momentum team in the next 3 minutes}.
+\]
+
+\subsection*{5. Statistical Model}
+
+Outcome modeled with Poisson regression:
+
+\[
+		Y_i \sim \text{Poisson}(\lambda_i)
+\]
+
+\[
+		\log(\lambda_i) =
+		\beta_0
+		+ \beta_1 \text{TVTimeout}_i
+		+ \beta_2 \text{RunSize}_i
+		+ \beta_3 \text{SubMomentum}_i
+		+ \beta_4 \text{SubOpponent}_i
+\]
+
+Key coefficient:
+
+\[
+		\beta_1 < 0
+\]
+
+indicates that timeouts reduce scoring during momentum.
+
+\subsection*{6. Main Result}
+
+TV timeouts reduce scoring by the momentum team:
+
+\[
+		e^{-0.119} - 1 \approx -11.2\%
+\]
+
+Interpretation:
+
+\[
+		\text{Momentum team scores } \approx 11\% \text{ fewer points after TV timeout}.
+\]
+
+Average effect:
+
+\[
+		\approx 0.56 \text{ fewer points over the next 3 minutes}.
+\]
+
+Stronger effects appear for longer runs.
+
+\subsection*{7. Mechanisms}
+
+Two mechanisms explain the effect:
+
+\textbf{1. Pause in play}
+
+Stopping gameplay interrupts momentum.
+
+\textbf{2. Strategy changes}
+
+Substitutions or tactical adjustments.
+
+Evidence:
+
+\begin{itemize}
+		\item Timeouts with no substitutions still reduce scoring.
+		\item Strategy explains only about 40\% of the effect.
+\end{itemize}
+
+Thus most of the effect comes from the \textbf{stoppage itself}.
+
+\subsection*{8. Robustness Checks}
+
+Several tests confirm results:
+
+\begin{itemize}
+		\item different run thresholds (6, 10, 15 points)
+		\item alternative time windows for scoring
+		\item negative binomial models
+		\item Monte Carlo simulation with no momentum
+\end{itemize}
+
+Simulation result:
+
+\[
+		\text{If momentum } = 0
+		\Rightarrow \text{timeouts have no effect}.
+\]
+
+Thus the empirical effect is not a statistical artifact.
+
+\subsection*{9. Interpretation}
+
+Momentum behaves like a \textbf{state variable}:
+
+\[
+		\text{performance}_{t+1}
+		=
+		f(\text{performance}_t)
+\]
+
+Pausing play disrupts that state.
+
+This implies:
+
+\begin{itemize}
+		\item momentum exists at the \textbf{team level}
+		\item interruptions reduce performance
+\end{itemize}
+
+\subsection*{10. Implications}
+
+Strategic insights:
+
+\begin{itemize}
+		\item Timeouts help stop opponent momentum.
+		\item Momentum teams should avoid substitutions.
+\end{itemize}
+
+Methodological contribution:
+
+\begin{itemize}
+		\item Demonstrates how \textbf{natural experiments} can detect causal effects in sports.
+		\item Shows value of \textbf{matching methods in observational data}.
+\end{itemize}
+
+\bigskip
+
+\textbf{Key Insight}
+
+Momentum in basketball is not purely psychological.
+
+\[
+		\text{Performance is serially correlated at the team level.}
+\]
+
+Interrupting play breaks that correlation.
+
+\end{document}
