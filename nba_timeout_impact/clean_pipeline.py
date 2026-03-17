@@ -186,6 +186,40 @@ class EnforceMonotonicity(PandasColumnOrderBase):
         return X
 
 
+class GameTimeElapsed(PandasColumnOrderBase):
+    """
+    Add ``game_seconds_elapsed`` — absolute seconds from tip-off, monotonically
+    increasing within each game and robust to any number of overtime periods.
+
+    Layout:
+        Regulation periods 1-4 : each 720 s  (12 min)
+        OT periods 5, 6, 7 … : each 300 s  (5 min)
+
+    Formula:
+        period <= 4 : (period - 1) * 720  + seconds_elapsed
+        period >= 5 : 4 * 720 + (period - 5) * 300 + seconds_elapsed
+
+    Requires ``period`` and ``seconds_elapsed`` to already be present
+    (i.e. must run after NBAStatsV3ClockParser).
+    """
+
+    REG_PERIOD_SECS = 720
+    OT_PERIOD_SECS = 300
+    REG_PERIODS = 4
+
+    def _fit(self, X: pd.DataFrame, y=None) -> "GameTimeElapsed":
+        assert "period" in X.columns, "Expected 'period' column — run after NBAStatsV3ClockParser."
+        assert "seconds_elapsed" in X.columns, "Expected 'seconds_elapsed' column — run after NBAStatsV3ClockParser."
+        return self
+
+    def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        reg_offset = np.minimum(X["period"] - 1, self.REG_PERIODS) * self.REG_PERIOD_SECS
+        ot_offset = np.maximum(X["period"] - self.REG_PERIODS - 1, 0) * self.OT_PERIOD_SECS
+        X["game_seconds_elapsed"] = reg_offset + ot_offset + X["seconds_elapsed"]
+        self.new_columns = list(X.columns)
+        return X
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -230,6 +264,10 @@ class NBAStatsV3CleanPipeline:
             "scoreHome",
             "scoreAway",
             "pointsTotal",
+            "period",
+            "game_seconds_elapsed",
+            "seconds_remaining",
+            "seconds_elapsed",
         ]
         end_cols = [
             "playerNameI",
@@ -252,6 +290,7 @@ class NBAStatsV3CleanPipeline:
                 ("load_df", df_load),
                 ("strip_strings", StripStringColumns()),
                 ("parse_clock", NBAStatsV3ClockParser()),
+                ("game_time", GameTimeElapsed()),
                 ("merge_datetime", MergeDateTime(self.path_root / "nba_game_dates.parquet")),
                 ("sort", SortByDate()),
                 ("cats", cats),
