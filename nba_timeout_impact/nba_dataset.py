@@ -36,7 +36,7 @@ class NBAMemoDF(MemoDataFrame[NBADatasetInput_TypedDict]):
         return self._df_dict[key]
 
     @memo_fn
-    def ptr_n_minutes(self, n: float) -> np.ndarray:
+    def ptr_n_mins(self, n: float) -> np.ndarray:
         """
         For every event, return the positional index (0-based row number) of
         the closest event ``n`` minutes in the future (n > 0) or past (n < 0)
@@ -47,7 +47,7 @@ class NBAMemoDF(MemoDataFrame[NBADatasetInput_TypedDict]):
 
         Example
         -------
-        >>> ptrs = nba_memo.ptr_n_minutes(3)
+        >>> ptrs = nba_memo.ptr_n_mins(3)
         >>> nba_memo.data.iloc[ptrs[ptrs != -1]]   # events 3 min ahead
         """
         window = n * 60.0
@@ -93,9 +93,21 @@ class NBAMemoDF(MemoDataFrame[NBADatasetInput_TypedDict]):
         return self.data.scoreHome - self.data.scoreAway
 
     @memo_fn
-    def lead_change_n_minutes(self, n: float):
-        diff = self.lead[self.ptr_n_minutes(n)] - self.lead
+    def lead_change_n_mins(self, n: float):
+        """
+        If value is positive, home team lead increased (or deficit decreased) after n minutes.
+
+        If value is negative, home team lead decreased (or deficit increased) after n minutes.
+        """
+        diff = self.lead[self.ptr_n_mins(n)] - self.lead
         return diff
+
+    @memo_fn
+    def score_diff_n_mins(self, n: float):
+        """
+        Alias for lead_change_n_minutes, since score diff and lead are the same thing — just different sign conventions.
+        """
+        return self.lead_change_n_mins(n)
 
     """STREAKS"""
 
