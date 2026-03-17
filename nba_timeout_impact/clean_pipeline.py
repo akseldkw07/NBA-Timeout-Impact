@@ -18,11 +18,11 @@ Usage
 import typing as t
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from kret_sklearn.custom_transformers import PandasColumnOrderBase
 from kret_sklearn.pd_pipeline import PipelinePD
 from sklearn.preprocessing import FunctionTransformer
-import numpy as np
 
 # ---------------------------------------------------------------------------
 # Transformers
