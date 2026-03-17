@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from kret_np_pd.UTILS_np_pd import NP_PD_Utils
 from kret_sklearn.custom_transformers import PandasColumnOrderBase
 from kret_sklearn.pd_pipeline import PipelinePD
 from sklearn.preprocessing import FunctionTransformer
@@ -101,6 +102,28 @@ class MergeDateTime(PandasColumnOrderBase):
         return X
 
 
+class SortByDate(PandasColumnOrderBase):
+    """
+    NOTE: this must occur after MergeDateTime for correct sorting
+    """
+
+    sort_col = ["game_date_ffill", "gameId", "actionId"]
+
+    def _fit(self, X: pd.DataFrame, y=None) -> "SortByDate":
+        assert all(
+            col in X.columns for col in self.sort_col
+        ), f"Expected columns {self.sort_col} not found in DataFrame."
+        assert all(
+            X[col].isna().sum() == 0 for col in self.sort_col
+        ), f"Expected no missing values in sort columns {self.sort_col}."
+        return self
+
+    def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        X = X.sort_values(self.sort_col, ascending=[True, True, True]).reset_index(drop=True)
+        self.new_columns = list(X.columns)
+        return X
+
+
 class CategoricalConversion(PandasColumnOrderBase):
     cols: list[str]
 
@@ -119,20 +142,80 @@ class CategoricalConversion(PandasColumnOrderBase):
         return X
 
 
-class SortByDate(PandasColumnOrderBase):
-    sort_col = ["game_date_ffill", "gameId", "actionId"]
+class ConvertToInt(PandasColumnOrderBase):
+    """
+    NOTE: this MUST occur after sort, for ffill to work correctly.
+    """
 
-    def _fit(self, X: pd.DataFrame, y=None) -> "SortByDate":
-        assert all(
-            col in X.columns for col in self.sort_col
-        ), f"Expected columns {self.sort_col} not found in DataFrame."
-        assert all(
-            X[col].isna().sum() == 0 for col in self.sort_col
-        ), f"Expected no missing values in sort columns {self.sort_col}."
+    cols: list[str]
+
+    def __init__(self, cols: list[str]) -> None:
+        self.cols = cols
+
+    def _fit(self, X: pd.DataFrame, y=None) -> "ConvertToInt":
+        for col in self.cols:
+            assert col in X.columns, f"Expected column '{col}' not found in DataFrame."
         return self
 
     def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
-        X = X.sort_values(self.sort_col, ascending=[True, True, True]).reset_index(drop=True)
+        for col in self.cols:
+            X[col] = X[col].ffill().fillna(0).astype(int)
+        self.new_columns = list(X.columns)
+        return X
+
+
+class EnforceMonotonicity(PandasColumnOrderBase):
+    """
+    NOTE: this must convert after ConvertToInt
+    """
+
+    cols: list[str]
+
+    def __init__(self, cols: list[str]) -> None:
+        self.cols = cols
+
+    def _fit(self, X: pd.DataFrame, y=None) -> "EnforceMonotonicity":
+        for col in self.cols:
+            assert col in X.columns, f"Expected column '{col}' not found in DataFrame."
+        return self
+
+    def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        for col in self.cols:
+            X[col] = X.groupby("gameId")[col].cummax()
+        self.new_columns = list(X.columns)
+        return X
+
+
+class GameTimeElapsed(PandasColumnOrderBase):
+    """
+    Add ``game_seconds_elapsed`` — absolute seconds from tip-off, monotonically
+    increasing within each game and robust to any number of overtime periods.
+
+    Layout:
+        Regulation periods 1-4 : each 720 s  (12 min)
+        OT periods 5, 6, 7 … : each 300 s  (5 min)
+
+    Formula:
+        period <= 4 : (period - 1) * 720  + seconds_elapsed
+        period >= 5 : 4 * 720 + (period - 5) * 300 + seconds_elapsed
+
+    Requires ``period`` and ``seconds_elapsed`` to already be present
+    (i.e. must run after NBAStatsV3ClockParser).
+    """
+
+    REG_PERIOD_SECS = 720
+    OT_PERIOD_SECS = 300
+    REG_PERIODS = 4
+
+    def _fit(self, X: pd.DataFrame, y=None) -> "GameTimeElapsed":
+        assert "period" in X.columns, "Expected 'period' column — run after NBAStatsV3ClockParser."
+        assert "seconds_elapsed" in X.columns, "Expected 'seconds_elapsed' column — run after NBAStatsV3ClockParser."
+        return self
+
+    def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        reg_offset = np.minimum(X["period"] - 1, self.REG_PERIODS) * self.REG_PERIOD_SECS
+        ot_offset = np.maximum(X["period"] - self.REG_PERIODS - 1, 0) * self.OT_PERIOD_SECS
+        X["game_seconds_elapsed"] = reg_offset + ot_offset + X["seconds_elapsed"]
         self.new_columns = list(X.columns)
         return X
 
@@ -171,15 +254,49 @@ class NBAStatsV3CleanPipeline:
                 "shotResult",
             ]
         )
+        score_cols = ["scoreHome", "scoreAway", "pointsTotal"]
+        start_cols = [
+            "game_date_ffill",
+            "gameId",
+            "actionId",
+            "actionType",
+            "subType",
+            "scoreHome",
+            "scoreAway",
+            "pointsTotal",
+            "period",
+            "game_seconds_elapsed",
+            "seconds_remaining",
+            "seconds_elapsed",
+        ]
+        end_cols = [
+            "playerNameI",
+            "actionNumber",
+            "clock",
+            "teamId",
+            "personId",
+            "playerName",
+            "xLegacy",
+            "yLegacy",
+            "shotDistance",
+            "videoAvailable",
+        ]
+        sort_cols = FunctionTransformer(
+            func=NP_PD_Utils.move_columns, validate=False, kw_args={"start": start_cols, "end": end_cols}
+        )
 
         self._pipeline = PipelinePD(
             steps=[
                 ("load_df", df_load),
                 ("strip_strings", StripStringColumns()),
                 ("parse_clock", NBAStatsV3ClockParser()),
+                ("game_time", GameTimeElapsed()),
                 ("merge_datetime", MergeDateTime(self.path_root / "nba_game_dates.parquet")),
-                ("cats", cats),
                 ("sort", SortByDate()),
+                ("cats", cats),
+                ("convert_int", ConvertToInt(score_cols)),
+                ("enforce_monotonicity", EnforceMonotonicity(score_cols)),
+                ("sort_cols", sort_cols),
             ]
         )
 
