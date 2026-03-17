@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from kret_np_pd.UTILS_np_pd import NP_PD_Utils
 from kret_sklearn.custom_transformers import PandasColumnOrderBase
 from kret_sklearn.pd_pipeline import PipelinePD
 from sklearn.preprocessing import FunctionTransformer
@@ -101,6 +102,28 @@ class MergeDateTime(PandasColumnOrderBase):
         return X
 
 
+class SortByDate(PandasColumnOrderBase):
+    """
+    NOTE: this must occur after MergeDateTime for correct sorting
+    """
+
+    sort_col = ["game_date_ffill", "gameId", "actionId"]
+
+    def _fit(self, X: pd.DataFrame, y=None) -> "SortByDate":
+        assert all(
+            col in X.columns for col in self.sort_col
+        ), f"Expected columns {self.sort_col} not found in DataFrame."
+        assert all(
+            X[col].isna().sum() == 0 for col in self.sort_col
+        ), f"Expected no missing values in sort columns {self.sort_col}."
+        return self
+
+    def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        X = X.sort_values(self.sort_col, ascending=[True, True, True]).reset_index(drop=True)
+        self.new_columns = list(X.columns)
+        return X
+
+
 class CategoricalConversion(PandasColumnOrderBase):
     cols: list[str]
 
@@ -119,20 +142,46 @@ class CategoricalConversion(PandasColumnOrderBase):
         return X
 
 
-class SortByDate(PandasColumnOrderBase):
-    sort_col = ["game_date_ffill", "gameId", "actionId"]
+class ConvertToInt(PandasColumnOrderBase):
+    """
+    NOTE: this MUST occur after sort, for ffill to work correctly.
+    """
 
-    def _fit(self, X: pd.DataFrame, y=None) -> "SortByDate":
-        assert all(
-            col in X.columns for col in self.sort_col
-        ), f"Expected columns {self.sort_col} not found in DataFrame."
-        assert all(
-            X[col].isna().sum() == 0 for col in self.sort_col
-        ), f"Expected no missing values in sort columns {self.sort_col}."
+    cols: list[str]
+
+    def __init__(self, cols: list[str]) -> None:
+        self.cols = cols
+
+    def _fit(self, X: pd.DataFrame, y=None) -> "ConvertToInt":
+        for col in self.cols:
+            assert col in X.columns, f"Expected column '{col}' not found in DataFrame."
         return self
 
     def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
-        X = X.sort_values(self.sort_col, ascending=[True, True, True]).reset_index(drop=True)
+        for col in self.cols:
+            X[col] = X[col].ffill().fillna(0).astype(int)
+        self.new_columns = list(X.columns)
+        return X
+
+
+class EnforceMonotonicity(PandasColumnOrderBase):
+    """
+    NOTE: this must convert after ConvertToInt
+    """
+
+    cols: list[str]
+
+    def __init__(self, cols: list[str]) -> None:
+        self.cols = cols
+
+    def _fit(self, X: pd.DataFrame, y=None) -> "EnforceMonotonicity":
+        for col in self.cols:
+            assert col in X.columns, f"Expected column '{col}' not found in DataFrame."
+        return self
+
+    def _transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        for col in self.cols:
+            X[col] = X.groupby("gameId")[col].cummax()
         self.new_columns = list(X.columns)
         return X
 
@@ -171,6 +220,32 @@ class NBAStatsV3CleanPipeline:
                 "shotResult",
             ]
         )
+        score_cols = ["scoreHome", "scoreAway", "pointsTotal"]
+        start_cols = [
+            "game_date_ffill",
+            "gameId",
+            "actionId",
+            "actionType",
+            "subType",
+            "scoreHome",
+            "scoreAway",
+            "pointsTotal",
+        ]
+        end_cols = [
+            "playerNameI",
+            "actionNumber",
+            "clock",
+            "teamId",
+            "personId",
+            "playerName",
+            "xLegacy",
+            "yLegacy",
+            "shotDistance",
+            "videoAvailable",
+        ]
+        sort_cols = FunctionTransformer(
+            func=NP_PD_Utils.move_columns, validate=False, kw_args={"start": start_cols, "end": end_cols}
+        )
 
         self._pipeline = PipelinePD(
             steps=[
@@ -178,8 +253,11 @@ class NBAStatsV3CleanPipeline:
                 ("strip_strings", StripStringColumns()),
                 ("parse_clock", NBAStatsV3ClockParser()),
                 ("merge_datetime", MergeDateTime(self.path_root / "nba_game_dates.parquet")),
-                ("cats", cats),
                 ("sort", SortByDate()),
+                ("cats", cats),
+                ("convert_int", ConvertToInt(score_cols)),
+                ("enforce_monotonicity", EnforceMonotonicity(score_cols)),
+                ("sort_cols", sort_cols),
             ]
         )
 

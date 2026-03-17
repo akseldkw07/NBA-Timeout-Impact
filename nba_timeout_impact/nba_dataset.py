@@ -1,5 +1,7 @@
+import typing as t
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from kret_np_pd.enriched_df import Enriched_DF
 from kret_np_pd.memo_df import InputTypedDict, MemoDataFrame, memo_array
@@ -19,6 +21,46 @@ class NBAMemoDF(MemoDataFrame[NBADatasetInput_TypedDict]):
     @memo_array
     def f_timeout(self):
         return self.data.actionType == "Timeout"
+
+    @memo_array
+    def f_timeout_exogenous(self):
+        return self.f_timeout & (self.data.subType.isin(["Official", "Official TV"]))
+
+    @memo_array
+    def f_timeout_endogenous(self):
+        return self.f_timeout & self.data.subType.isin(["Regular", "Short", "Coach Challenge"])
+
+    @memo_array
+    def streak(self):
+        df = self.data
+        game_start = df["gameId"].ne(df["gameId"].shift(fill_value=-1))
+
+        # Zero out at game boundaries — no NaN, no bleed from previous game
+        home_pts = df["scoreHome"].diff().clip(lower=0).where(~game_start, 0).fillna(0).astype(int)
+        away_pts = df["scoreAway"].diff().clip(lower=0).where(~game_start, 0).fillna(0).astype(int)
+        net = home_pts - away_pts
+
+        scorer = t.cast(pd.Series, np.sign(net).replace(0, np.nan)).ffill().fillna(0)  # type: ignore
+
+        # game_start acts as a hard reset even if scorer bleeds across boundary
+        new_segment = game_start | ((net != 0) & (scorer != scorer.shift(fill_value=0)))
+        segment = new_segment.cumsum()
+
+        ret = net.groupby(segment).cumsum()
+        ret.name = "streak"
+        return ret
+
+    @memo_array
+    def f_streak_6(self):
+        return np.abs(self.streak) >= 6
+
+    @memo_array
+    def f_streak_9(self):
+        return np.abs(self.streak) >= 9
+
+    @memo_array
+    def f_streak_12(self):
+        return np.abs(self.streak) >= 12
 
 
 class NBADataset(Enriched_DF):
@@ -56,4 +98,28 @@ class NBADataset(Enriched_DF):
     def load_from_parquet(cls, path: str | Path | None = None) -> "NBADataset":
         path = path or NBAConstants.NBA_DATA_DIR / "nba_statsv3_clean.parquet"
         df = pd.read_parquet(path)
-        return cls(df)
+        ret = cls(df)
+        ret.validate_data()
+        return ret
+
+    def validate_data(self):
+        print("Validating data...")
+        assert (
+            self.game_date_ffill.is_monotonic_increasing
+        ), "game_date_ffill must be sorted, but found non-monotonic values at indices "
+
+        assert (
+            self["gameId"].diff().ne(0) & self["gameId"].duplicated()
+        ).sum() == 0, f"gameId must be sorted and non-duplicated, but found duplicates at indices {self['gameId'].index[self['gameId'].duplicated()]} "
+
+        for col in ["actionId", "scoreHome", "scoreAway"]:
+            assert col in self.columns, f"Expected column '{col}' not found in DataFrame."
+            assert self[col].dtype in [int], f"Column '{col}' must be int, but found dtype {self[col].dtype}."
+            assert (
+                self[col].isna().sum() == 0
+            ), f"Column '{col}' must not contain NaN values, but found {self[col].isna().sum()} NaNs."
+
+            check = self.groupby("gameId")[col].is_monotonic_increasing
+            assert (
+                check.all()
+            ), f"{col} must be non-decreasing within each gameId, but found decreases at gameIds {check.index[~check]}"
