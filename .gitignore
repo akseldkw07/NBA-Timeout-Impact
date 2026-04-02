@@ -106,3 +106,4 @@ data/
 # Claude Desktop
 ClaudeDesktopConfig.json
 .claude/
+*.code-workspace
