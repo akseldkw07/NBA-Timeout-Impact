@@ -35,14 +35,13 @@ EVENTMSGTYPE reference (nbastats)
 18 Instant replay
 """
 
-import time
-
-from nba_api.stats.endpoints import LeagueGameLog
 import tarfile
+import time
 import typing as t
 from pathlib import Path
 
 import pandas as pd
+from nba_api.stats.endpoints import LeagueGameLog
 
 DATA_SRC_TYPE = t.Literal["nbastats", "nbastatsv3", "datanba", "pbpstats", "shotdetail", "cdnnba", "matchups"]
 SeasonsArg = int | t.Sequence[int] | None
