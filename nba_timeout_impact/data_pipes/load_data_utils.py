@@ -35,6 +35,9 @@ EVENTMSGTYPE reference (nbastats)
 18 Instant replay
 """
 
+import time
+
+from nba_api.stats.endpoints import LeagueGameLog
 import tarfile
 import typing as t
 from pathlib import Path
@@ -306,9 +309,6 @@ class NBADataLoader:
         -------
         pd.DataFrame with columns: GAME_ID (int), game_date (datetime.date)
         """
-        import time
-
-        from nba_api.stats.endpoints import LeagueGameLog
 
         SEASON_TYPE = {False: "Regular Season", True: "Playoffs"}
 

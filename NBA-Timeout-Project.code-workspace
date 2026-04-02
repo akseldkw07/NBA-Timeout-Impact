@@ -1,0 +1,25 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../coding/kretsinger"
+		},
+		{
+			"path": "../../../coding/Columbia/nba_data"
+		},
+		{
+			"path": "../../../coding/Columbia/nba-on-court"
+		},
+		{
+			"path": "../../../coding/data_kretsinger"
+		},
+		{
+			"path": "../NBA_Genie"
+		}
+	],
+	"settings": {
+		"chatgpt.openOnStartup": false
+	}
+}
