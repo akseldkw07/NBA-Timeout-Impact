@@ -48,14 +48,26 @@ DATA_SRC_TYPE = t.Literal["nbastats", "nbastatsv3", "datanba", "pbpstats", "shot
 SeasonsArg = int | t.Sequence[int] | None
 
 
-def _resolve_columbia_dir() -> Path:
-    for p in (
-        Path("/Users/Akseldkw/coding/Columbia"),
-        Path("/sessions/busy-determined-hypatia/mnt/Columbia"),
-    ):
-        if p.exists():
-            return p
-    raise RuntimeError("Cannot find Columbia directory.")
+def _resolve_parent_dir() -> Path:
+    """Resolve the parent directory containing nba_data, nba-on-court, etc.
+
+    Walks up from this file's location looking for a directory that contains
+    'nba_data/datasets/'.  Works on any machine as long as the repo layout is:
+
+        <parent>/
+            NBA-Timeout-Impact/   (this repo)
+            nba_data/datasets/
+            nba-on-court/
+    """
+    anchor = Path(__file__).resolve().parent
+    for _ in range(6):
+        anchor = anchor.parent
+        if (anchor / "nba_data" / "datasets").is_dir():
+            return anchor
+    raise RuntimeError(
+        "Cannot find parent directory containing nba_data/datasets/. "
+        "Expected it as a sibling of the NBA-Timeout-Impact repo."
+    )
 
 
 class NBADataLoader:
@@ -71,9 +83,9 @@ class NBADataLoader:
         avail = NBA.available_seasons("nbastats")
     """
 
-    _COLUMBIA: t.ClassVar[Path] = _resolve_columbia_dir()
-    DATA_DIR: t.ClassVar[Path] = _COLUMBIA / "nba_data" / "datasets"
-    ON_COURT_DIR: t.ClassVar[Path] = _COLUMBIA / "nba-on-court"
+    _PARENT: t.ClassVar[Path] = _resolve_parent_dir()
+    DATA_DIR: t.ClassVar[Path] = _PARENT / "nba_data" / "datasets"
+    ON_COURT_DIR: t.ClassVar[Path] = _PARENT / "nba-on-court"
 
     # ------------------------------------------------------------------
     # Private helpers
