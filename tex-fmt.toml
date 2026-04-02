@@ -1,1 +1,2 @@
-/Users/Akseldkw/coding/kretsinger/tex-fmt.toml
+tabchar = "tab"
+wraplen = 120
