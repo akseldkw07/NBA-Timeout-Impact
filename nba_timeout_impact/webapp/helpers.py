@@ -328,40 +328,8 @@ def execute_sql(conn, sql):
             )
 
 
-_SAFE_NAMES = [
-    "abs",
-    "all",
-    "any",
-    "bool",
-    "dict",
-    "enumerate",
-    "filter",
-    "float",
-    "format",
-    "frozenset",
-    "int",
-    "isinstance",
-    "len",
-    "list",
-    "map",
-    "max",
-    "min",
-    "print",
-    "range",
-    "reversed",
-    "round",
-    "set",
-    "slice",
-    "sorted",
-    "str",
-    "sum",
-    "tuple",
-    "type",
-    "zip",
-]
 _b = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)
-SAFE_BUILTINS = {k: _b[k] for k in _SAFE_NAMES if k in _b}
-SAFE_BUILTINS.update({"True": True, "False": False, "None": None})
+SAFE_BUILTINS = dict(_b)
 
 
 def draw_court(fig=None):

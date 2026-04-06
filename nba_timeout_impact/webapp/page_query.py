@@ -152,6 +152,18 @@ def query_page():
                 raw = call_llm(client, msgs, system=SYSTEM_PROMPT)
                 parsed = parse_response(raw)
 
+                # If Claude responded with prose instead of JSON, retry with a nudge
+                if not parsed.get("sql"):
+                    retry_msgs = msgs + [
+                        {"role": "assistant", "content": raw},
+                        {
+                            "role": "user",
+                            "content": 'You must respond with ONLY a JSON object containing "sql", "explanation", "plot" (optional), "tables_used", and "columns_used" fields. No prose, no thinking, no markdown — just the JSON. If the question requires multiple queries, pick the most important one.',
+                        },
+                    ]
+                    raw = call_llm(client, retry_msgs, system=SYSTEM_PROMPT)
+                    parsed = parse_response(raw)
+
             result_entry = {
                 "sql": parsed.get("sql", ""),
                 "explanation": parsed.get("explanation", ""),

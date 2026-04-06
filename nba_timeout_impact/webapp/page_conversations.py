@@ -3,7 +3,6 @@
 import streamlit as st
 
 from nba_timeout_impact.webapp import storage
-from nba_timeout_impact.webapp.page_query import query_page
 
 
 def conversations_page():
@@ -63,7 +62,7 @@ def conversations_page():
             with col1:
                 if st.button("Resume", key=f"resume_{cid}"):
                     st.session_state.load_conversation = cid
-                    st.switch_page(query_page)
+                    st.rerun()
             with col2:
                 if st.button("Delete", key=f"del_conv_{cid}"):
                     storage.delete_conversation(cid)

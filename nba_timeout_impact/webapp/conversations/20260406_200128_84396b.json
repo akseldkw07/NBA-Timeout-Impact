@@ -1,0 +1,24 @@
+{
+  "id": "20260406_200128_84396b",
+  "last_activity": "2026-04-06T20:01:28.252450",
+  "messages": [
+    {
+      "content": "if team x is on a run of 6+ points and team y calls a timeout, how does that impact the points scored over the next 3 minutes compared to the case where no timeout is called? how does this impact differ from the case where the timeout is exogenous (ie pre-planned nba game break)\n\n",
+      "role": "user"
+    },
+    {
+      "content": "Failed to parse LLM response\n\nError: No SQL generated",
+      "role": "assistant"
+    }
+  ],
+  "results": [
+    {
+      "columns_used": {},
+      "error": "No SQL generated",
+      "explanation": "Failed to parse LLM response",
+      "sql": "",
+      "tables_used": []
+    }
+  ],
+  "started_at": "if team x is on a run of 6+ points and team y calls a timeout, how does that impact the points score"
+}
