@@ -98,6 +98,9 @@ static_collected/
 *.swp     # Vim swap files
 .DS_Store # macOS specific
 
+# Streamlit
+.streamlit/
+
 scratch/
 vault/
 data/
