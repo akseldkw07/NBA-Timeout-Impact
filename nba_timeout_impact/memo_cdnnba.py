@@ -261,7 +261,6 @@ class CDNNBADataset(Enriched_DF):
                 errors.append(f"IsPlayoff/season_type mismatch: {mismatch.sum():,} rows")
 
         if "shot_value" in self.columns:
-            {1, 2, 3, pd.NA}
             actual_sv = set(self["shot_value"].dropna().unique())
             if not actual_sv.issubset({1, 2, 3}):
                 errors.append(f"Invalid shot_value values: {actual_sv - {1, 2, 3}}")
