@@ -476,7 +476,9 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         Returns a DataFrame with columns:
             group ("endogenous", "exogenous", "control"),
             recovery (lead change from suffering team's perspective),
-            streak_at_event, gameId, game_seconds_elapsed
+            running_team_pts (points scored by running team in next N minutes),
+            streak_at_event, gameId, game_seconds_elapsed,
+            suffering_location, suffering_margin
 
         NOT cached — recomputed each call since parameters vary.
         """
@@ -484,7 +486,19 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         streak_s = self.streak
         lead_s = self.lead
         lead_fwd = self.lead_change_n_mins(minutes)
+        ptr_fwd = self.ptr_n_mins(minutes)
         home_teams = self.home_team_per_game
+
+        # Compute running team's raw points in next N minutes
+        # ptr_fwd gives us the row index N minutes ahead
+        score_home_now = df["scoreHome"]
+        score_away_now = df["scoreAway"]
+        valid_ptr = ptr_fwd.is_not_null()
+        safe_ptr = ptr_fwd.cast(pl.UInt32).fill_null(0)
+        score_home_fwd = df["scoreHome"].gather(safe_ptr).set(~valid_ptr, None)
+        score_away_fwd = df["scoreAway"].gather(safe_ptr).set(~valid_ptr, None)
+        home_pts_scored = score_home_fwd - score_home_now
+        away_pts_scored = score_away_fwd - score_away_now
 
         analysis = pl.DataFrame(
             {
@@ -496,6 +510,8 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
                 "streak": streak_s,
                 "lead": lead_s,
                 "lead_change": lead_fwd,
+                "home_pts_scored": home_pts_scored,
+                "away_pts_scored": away_pts_scored,
             }
         ).join(home_teams, on="gameId", how="left")
 
@@ -507,10 +523,16 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         # From suffering team's perspective:
         # streak > 0 → home running, away suffering → flip sign
         # streak < 0 → away running, home suffering → keep sign
+        # Running team's points:
+        # streak > 0 → home running → running_team_pts = home_pts_scored
+        # streak < 0 → away running → running_team_pts = away_pts_scored
         analysis = analysis.with_columns(
             (-pl.col("streak").sign() * pl.col("lead_change")).alias("recovery"),
-            # Margin from suffering team's perspective (positive = suffering team ahead)
             (-pl.col("streak").sign() * pl.col("lead")).alias("suffering_margin"),
+            pl.when(pl.col("streak") > 0)
+            .then(pl.col("home_pts_scored"))
+            .otherwise(pl.col("away_pts_scored"))
+            .alias("running_team_pts"),
         )
 
         # Classify events
@@ -573,6 +595,7 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         cols = [
             "group",
             "recovery",
+            "running_team_pts",
             pl.col("streak").alias("streak_at_event"),
             "gameId",
             "game_seconds_elapsed",

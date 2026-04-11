@@ -599,8 +599,9 @@ class NBAPlottingUtils:
         run_size: int = 5,
         minutes: float = 3.0,
         max_abs_margin: int | None = None,
+        metric: t.Literal["recovery", "running_team_pts"] = "recovery",
     ) -> go.Figure:
-        """2x2 grid of mean recovery bar charts, split by home/away and ahead/behind.
+        """2x2 grid of bar charts, split by home/away and ahead/behind.
 
         Each subplot shows Coach Timeout vs TV/Official Stoppage vs No Stoppage
         with 95% CI error bars.
@@ -616,8 +617,22 @@ class NBAPlottingUtils:
             If set, only include events where |suffering_margin| <= this value
             (i.e. close games only).
         """
+        metric_labels = {
+            "recovery": (
+                "Mean Recovery (pts)",
+                "Scoring Run Recovery by Situation",
+                "Suffering team's net lead change",
+            ),
+            "running_team_pts": (
+                "Running Team Pts Scored",
+                "Running Team Scoring After Stoppage",
+                "Points scored by the team on the run",
+            ),
+        }
+        y_label, title_prefix, metric_desc = metric_labels[metric]
+
         print(
-            f"Stoppage run impact grid: run>={run_size}, forward={minutes}min"
+            f"Stoppage run impact grid: run>={run_size}, forward={minutes}min, metric={metric}"
             f"{f', |margin|<={max_abs_margin}' if max_abs_margin else ''}"
         )
         data = memo.stoppage_run_impact(run_size=run_size, minutes=minutes)
@@ -667,7 +682,7 @@ class NBAPlottingUtils:
             arrays: dict[str, np.ndarray] = {}
 
             for gname, gcolor, glabel in group_defs:
-                arr = panel_data.filter(pl.col("group") == gname)["recovery"].to_numpy()
+                arr = panel_data.filter(pl.col("group") == gname)[metric].to_numpy()
                 arrays[gname] = arr
                 if len(arr) == 0:
                     continue
@@ -699,7 +714,7 @@ class NBAPlottingUtils:
             )
 
             fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=row, col=col)  # type: ignore
-            fig.update_yaxes(title_text="Mean Recovery (pts)" if col == 1 else "", row=row, col=col)
+            fig.update_yaxes(title_text=y_label if col == 1 else "", row=row, col=col)
 
             # Significance: endo vs ctrl
             endo_arr = arrays.get("endogenous", np.array([]))
@@ -724,8 +739,8 @@ class NBAPlottingUtils:
 
         margin_label = f" | |margin| <= {max_abs_margin}" if max_abs_margin else ""
         fig.update_layout(
-            title_text=f"Scoring Run Recovery by Situation<br>"
-            f"<sup>Run >= {run_size} pts | {minutes}min forward{margin_label} | 95% CI</sup>",
+            title_text=f"{title_prefix}<br>"
+            f"<sup>{metric_desc} | Run >= {run_size} pts | {minutes}min forward{margin_label} | 95% CI</sup>",
             template="plotly_dark",
             width=1200,
             height=900,
