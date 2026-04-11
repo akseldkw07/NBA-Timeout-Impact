@@ -2,10 +2,9 @@
 Polars-based Enriched DataFrame and MemoDataFrame for cleaned cdn.nba.com play-by-play data.
 
 Usage:
-    from nba_timeout_impact.memo_cdnnba_pl import CDNNBADatasetPL, CDNNBAMemoDFPL
+    from nba_timeout_impact.datasets.memo_cdnnba_pl import CDNNBAMemoPL
 
-    ds = CDNNBADatasetPL.load_from_parquet()
-    memo = CDNNBAMemoDFPL({"data": ds})
+    memo = CDNNBAMemoPL.load_all()
 """
 
 import typing as t
@@ -13,19 +12,201 @@ from pathlib import Path
 
 import polars as pl
 from kret_polars.enriched_df_pl import Enriched_DF_PL
-from kret_polars.memo_df_pl import InputTypedDictPL, MemoDataFramePL, memo_series
+from kret_polars.memo_df_pl import InputTypedDictPL, MemoDataFramePL, memo_fn, memo_series
 
 from nba_timeout_impact.constants import NBAConstants
+from .enriched_cdnnba import CDNNBADatasetPL
+from .enriched_boxscores import BoxscoresDatasetPL
+from .enriched_player_advanced_stats import PlayerAdvancedStatsDatasetPL
+from .enriched_player_season_stats import PlayerSeasonStatsDatasetPL
+from .enriched_rotations import RotationsDatasetPL
+from .enriched_stints import StintsDatasetPL
 
 
 class CDNNBADatasetInputPL(InputTypedDictPL):
-    data: "CDNNBADatasetPL"
+    data: CDNNBADatasetPL
+    boxscores: BoxscoresDatasetPL
+    player_advanced_stats: PlayerAdvancedStatsDatasetPL
+    player_season_stats: PlayerSeasonStatsDatasetPL
+    rotations: RotationsDatasetPL
+    stints: StintsDatasetPL
 
 
-class CDNNBAMemoDFPL(MemoDataFramePL[CDNNBADatasetInputPL]):
+class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
+
+    # -- dataset accessors --
+
     @property
-    def data(self) -> "CDNNBADatasetPL":
+    def cdnnba(self) -> CDNNBADatasetPL:
         return self.inputs["data"]
+
+    @property
+    def boxscores(self) -> BoxscoresDatasetPL:
+        return self.inputs["boxscores"]
+
+    @property
+    def player_advanced_stats(self) -> PlayerAdvancedStatsDatasetPL:
+        return self.inputs["player_advanced_stats"]
+
+    @property
+    def player_season_stats(self) -> PlayerSeasonStatsDatasetPL:
+        return self.inputs["player_season_stats"]
+
+    @property
+    def rotations(self) -> RotationsDatasetPL:
+        return self.inputs["rotations"]
+
+    @property
+    def stints(self) -> StintsDatasetPL:
+        return self.inputs["stints"]
+
+    # -- load_all --
+
+    @classmethod
+    def load_all(cls) -> "CDNNBAMemoPL":
+        """Load all datasets from parquet and return a fully-initialized CDNNBAMemoPL."""
+        return cls({
+            "data": CDNNBADatasetPL.load_from_parquet(),
+            "boxscores": BoxscoresDatasetPL.load_from_parquet(),
+            "player_advanced_stats": PlayerAdvancedStatsDatasetPL.load_from_parquet(),
+            "player_season_stats": PlayerSeasonStatsDatasetPL.load_from_parquet(),
+            "rotations": RotationsDatasetPL.load_from_parquet(),
+            "stints": StintsDatasetPL.load_from_parquet(),
+        })
+
+    # ------------------------------------------------------------------ #
+    #  Pointer memo series — row indices into supplemental datasets        #
+    #                                                                      #
+    #  Each ptr_* returns a pl.Series(UInt32) aligned to the spine.        #
+    #  Usage:  memo.boxscores[memo.ptr_boxscores()]  to materialize.       #
+    # ------------------------------------------------------------------ #
+
+    @memo_series
+    def ptr_boxscores(self) -> pl.Series:
+        """Row index into boxscores for each spine row, joined on (gameId, personId).
+        Null where personId == 0 or no boxscore match.
+        """
+        spine = self.cdnnba.select("gameId", "personId")
+        box = (
+            pl.DataFrame._from_pydf(self.boxscores._df)
+            .select("gameId", "personId")
+            .with_row_index("_ptr")
+        )
+        return spine.join(box, on=["gameId", "personId"], how="left", coalesce=True)["_ptr"]
+
+    @memo_series
+    def ptr_player_advanced_stats(self) -> pl.Series:
+        """Row index into player_advanced_stats for each spine row,
+        joined on (personId=PLAYER_ID, season=season_int).
+        """
+        spine = self.cdnnba.select("personId", "season")
+        pas = (
+            pl.DataFrame._from_pydf(self.player_advanced_stats._df)
+            .rename({"PLAYER_ID": "personId", "season_int": "season"})
+            .select("personId", "season")
+            .with_row_index("_ptr")
+        )
+        return spine.join(pas, on=["personId", "season"], how="left", coalesce=True)["_ptr"]
+
+    @memo_series
+    def ptr_player_season_stats(self) -> pl.Series:
+        """Row index into player_season_stats (TOT-deduped) for each spine row,
+        joined on (personId=PLAYER_ID, season=season_int, season_type).
+
+        For traded players the TOT aggregate row is preferred so the pointer
+        is 1:1 per (player, season, season_type).
+        """
+        spine = self.cdnnba.select("personId", "season", "season_type")
+        # Add row index to the ORIGINAL df first, so ptrs reference original row positions.
+        pss = pl.DataFrame._from_pydf(self.player_season_stats._df).with_row_index("_ptr")
+        pss_tot = pss.filter(pl.col("TEAM_ABBREVIATION") == "TOT")
+        tot_keys = pss_tot.select("PLAYER_ID", "season_int", "season_type")
+        pss_single = pss.join(tot_keys, on=["PLAYER_ID", "season_int", "season_type"], how="anti")
+        pss_deduped = (
+            pl.concat([pss_tot, pss_single])
+            .rename({"PLAYER_ID": "personId", "season_int": "season"})
+            .select("personId", "season", "season_type", "_ptr")
+        )
+        return spine.join(pss_deduped, on=["personId", "season", "season_type"], how="left", coalesce=True)["_ptr"]
+
+    @memo_series
+    def ptr_stints(self) -> pl.Series:
+        """Row index into stints for each spine row. Uses join_asof on
+        (gameId, personId) with in_game_seconds <= game_seconds_elapsed < out_game_seconds.
+        """
+        spine = (
+            self.cdnnba
+            .select("gameId", "personId", "game_seconds_elapsed")
+            .with_row_index("_spine_idx")
+        )
+        st = (
+            pl.DataFrame._from_pydf(self.stints._df)
+            .with_row_index("_ptr")
+            .select("gameId", "personId", "in_game_seconds", "out_game_seconds", "_ptr")
+            .sort("gameId", "personId", "in_game_seconds")
+        )
+        joined = (
+            spine.sort("gameId", "personId", "game_seconds_elapsed")
+            .join_asof(
+                st,
+                left_on="game_seconds_elapsed",
+                right_on="in_game_seconds",
+                by=["gameId", "personId"],
+                strategy="backward",
+            )
+        )
+        # Null out pointer where game_seconds_elapsed is past the stint's out time
+        joined = joined.with_columns(
+            pl.when(pl.col("game_seconds_elapsed") >= pl.col("out_game_seconds"))
+            .then(None)
+            .otherwise(pl.col("_ptr"))
+            .alias("_ptr")
+        )
+        return joined.sort("_spine_idx")["_ptr"]
+
+    @memo_series
+    def ptr_rotations(self) -> pl.Series:
+        """Row index into rotations for each spine row. Uses join_asof on
+        (gameId, personId) with IN_TIME_REAL/10 <= game_seconds_elapsed < OUT_TIME_REAL/10.
+        """
+        spine = (
+            self.cdnnba
+            .select("gameId", "personId", "game_seconds_elapsed")
+            .with_row_index("_spine_idx")
+        )
+        rot = (
+            pl.DataFrame._from_pydf(self.rotations._df)
+            .with_row_index("_ptr")
+            .rename({"PERSON_ID": "personId"})
+            .with_columns(
+                (pl.col("IN_TIME_REAL") / 10.0).alias("in_seconds"),
+                (pl.col("OUT_TIME_REAL") / 10.0).alias("out_seconds"),
+            )
+            .select("gameId", "personId", "in_seconds", "out_seconds", "_ptr")
+            .sort("gameId", "personId", "in_seconds")
+        )
+        joined = (
+            spine.sort("gameId", "personId", "game_seconds_elapsed")
+            .join_asof(
+                rot,
+                left_on="game_seconds_elapsed",
+                right_on="in_seconds",
+                by=["gameId", "personId"],
+                strategy="backward",
+            )
+        )
+        # Null out pointer where game_seconds_elapsed is past the rotation's out time
+        joined = joined.with_columns(
+            pl.when(pl.col("game_seconds_elapsed") >= pl.col("out_seconds"))
+            .then(None)
+            .otherwise(pl.col("_ptr"))
+            .alias("_ptr")
+        )
+        return joined.sort("_spine_idx")["_ptr"]
+
+    # ------------------------------------------------------------------ #
+    #  Core memo series                                                    #
+    # ------------------------------------------------------------------ #
 
     @memo_series
     def f_clock_reversal(self) -> pl.Series:
@@ -39,292 +220,7 @@ class CDNNBAMemoDFPL(MemoDataFramePL[CDNNBADatasetInputPL]):
 
         Both are non-play metadata — safe to exclude from time-based analysis.
         """
-        df = self.data
+        df = self.cdnnba
         game_boundary = df["gameId"] != df["gameId"].shift(1)
         gse_diff = df["game_seconds_elapsed"].diff()
         return ((gse_diff < 0) & ~game_boundary).fill_null(False)
-
-
-class CDNNBADatasetPL(Enriched_DF_PL):
-    # -- key columns (sorted to front by pipeline) --
-    game_date: pl.Series  # Datetime(ms)
-    gameId: pl.Series  # Int64
-    orderNumber: pl.Series  # Int64
-    actionType: pl.Series  # Categorical
-    subType: pl.Series  # Categorical
-    description: pl.Series  # String
-    scoreHome: pl.Series  # Int64
-    scoreAway: pl.Series  # Int64
-    pointsTotal: pl.Series  # Int64
-    possession: pl.Series  # Int64
-    period: pl.Series  # Int64
-    game_seconds_elapsed: pl.Series  # Float64
-    seconds_remaining: pl.Series  # Float64
-    seconds_elapsed: pl.Series  # Float64
-    IsPlayoff: pl.Series  # Boolean
-
-    # -- context columns --
-    periodType: pl.Series  # Categorical
-    qualifiers: pl.Series  # String
-    edited: pl.Series  # Datetime(us, UTC)
-    isFieldGoal: pl.Series  # Int64
-    side: pl.Series  # Categorical
-    personIdsFilter: pl.Series  # String
-    teamTricode: pl.Series  # Categorical
-    descriptor: pl.Series  # String
-    jumpBallRecoveredName: pl.Series  # String
-    jumpBallWonPlayerName: pl.Series  # String
-    jumpBallWonPersonId: pl.Series  # Int64
-    jumpBallLostPlayerName: pl.Series  # String
-    jumpBallLostPersonId: pl.Series  # Int64
-    officialId: pl.Series  # Int64
-    turnoverTotal: pl.Series  # Int64
-    foulPersonalTotal: pl.Series  # Int64
-    foulTechnicalTotal: pl.Series  # Int64
-    foulDrawnPlayerName: pl.Series  # String
-    foulDrawnPersonId: pl.Series  # Int64
-    shotResult: pl.Series  # Categorical
-    assistPlayerNameInitial: pl.Series  # String
-    assistPersonId: pl.Series  # Int64
-    assistTotal: pl.Series  # Int64
-    shotActionNumber: pl.Series  # Int64
-    reboundTotal: pl.Series  # Int64
-    reboundDefensiveTotal: pl.Series  # Int64
-    reboundOffensiveTotal: pl.Series  # Int64
-    blockPlayerName: pl.Series  # String
-    blockPersonId: pl.Series  # Int64
-    jumpBallRecoverdPersonId: pl.Series  # Int64
-    stealPlayerName: pl.Series  # String
-    stealPersonId: pl.Series  # Int64
-    area: pl.Series  # Categorical
-    areaDetail: pl.Series  # Categorical
-    isTargetScoreLastPeriod: pl.Series  # Boolean
-
-    # -- player --
-    playerNameI: pl.Series  # Categorical
-    actionNumber: pl.Series  # Int64
-    clock: pl.Series  # String
-    timeActual: pl.Series  # Datetime(us, UTC)
-    teamId: pl.Series  # Int64
-    personId: pl.Series  # Int64
-    playerName: pl.Series  # Categorical
-    xLegacy: pl.Series  # Int64
-    yLegacy: pl.Series  # Int64
-    x: pl.Series  # Float64
-    y: pl.Series  # Float64
-    shotDistance: pl.Series  # Float64
-
-    # -- enriched columns --
-    season_type: pl.Series  # String
-    season: pl.Series  # Int64
-    shot_value: pl.Series  # Int64
-    points_scored: pl.Series  # Int64
-    score_margin: pl.Series  # Int64
-    is_clutch: pl.Series  # Boolean
-    prev_action_type: pl.Series  # Categorical
-    x_court: pl.Series  # Int32
-    y_court: pl.Series  # Int32
-    possession_id: pl.Series  # Int64
-    possession_points: pl.Series  # Int64
-    possession_outcome: pl.Series  # String
-
-    target_dtypes: t.ClassVar[dict[str, pl.DataType | type[pl.DataType]]] = {
-        "game_date": pl.Datetime("ms"),
-        "gameId": pl.Int64(),
-        "orderNumber": pl.Int64(),
-        "actionType": pl.Categorical(),
-        "subType": pl.Categorical(),
-        "description": pl.String(),
-        "scoreHome": pl.Int64(),
-        "scoreAway": pl.Int64(),
-        "possession": pl.Int64(),
-        "period": pl.Int64(),
-        "game_seconds_elapsed": pl.Float64(),
-        "seconds_remaining": pl.Float64(),
-        "seconds_elapsed": pl.Float64(),
-        "IsPlayoff": pl.Boolean(),
-        "personId": pl.Int64(),
-        "season": pl.Int64(),
-        "season_type": pl.String(),
-        "points_scored": pl.Int64(),
-        "score_margin": pl.Int64(),
-        "is_clutch": pl.Boolean(),
-    }
-
-    @classmethod
-    def load_from_parquet(cls, path: str | Path | None = None) -> "CDNNBADatasetPL":
-        path = path or NBAConstants.NBA_DATA_DIR / "cdnnba_enriched.parquet"
-        df = pl.read_parquet(path)
-        ret = cls(df)
-        ret.validate_data()
-        return ret
-
-    _VALID_OUTCOMES = {
-        "made_2pt",
-        "made_3pt",
-        "made_2pt_and1",
-        "made_3pt_and1",
-        "miss",
-        "miss_def_reb",
-        "turnover_live",
-        "turnover_dead",
-        "end_of_period",
-        "violation",
-        "other",
-    }
-
-    def validate_data(self):
-        print("Validating cdnnba data (Polars)...")
-        errors: list[str] = []
-        warnings: list[str] = []
-
-        # --- required columns ---
-        base_attrs = set(vars(Enriched_DF_PL).keys())
-        required = [k for k in self.__class__.__annotations__.keys() if k not in base_attrs]
-        missing = [c for c in required if c not in self.columns]
-        if missing:
-            errors.append(f"Missing columns: {missing}")
-
-        # --- sorting ---
-        if not self["game_date"].is_sorted():
-            errors.append("game_date is not sorted.")
-
-        gid = self["gameId"]
-        # rle length == n_unique means each gameId appears in one contiguous block
-        n_runs = gid.ne(gid.shift(1)).fill_null(True).sum()
-        if n_runs != gid.n_unique():
-            errors.append("gameId is not contiguously grouped (games interleaved).")
-
-        # --- no-null columns ---
-        no_null_cols = [
-            "gameId",
-            "orderNumber",
-            "period",
-            "scoreHome",
-            "scoreAway",
-            "game_seconds_elapsed",
-            "seconds_remaining",
-            "seconds_elapsed",
-            "game_date",
-            "actionType",
-            "personId",
-            "possession",
-            "IsPlayoff",
-            "season",
-            "season_type",
-            "points_scored",
-            "score_margin",
-            "is_clutch",
-        ]
-        for col in no_null_cols:
-            if col in self.columns:
-                n_null = self[col].null_count()
-                if n_null > 0:
-                    errors.append(f"Null values in non-nullable column '{col}' ({n_null:,})")
-
-        # --- monotonicity within games ---
-        for col in ["orderNumber", "scoreHome", "scoreAway"]:
-            if col not in self.columns:
-                continue
-            check = (
-                self.group_by("gameId", maintain_order=True)
-                .agg((pl.col(col).diff().drop_nulls() < 0).any().alias(col))
-                .filter(pl.col(col))
-            )
-            if check.height > 0:
-                bad = check["gameId"].head(5).to_list()
-                errors.append(f"{col} not non-decreasing within gameId, violations: {bad}")
-
-        # game_seconds_elapsed — warn only (known data quirk)
-        if "game_seconds_elapsed" in self.columns:
-            check = (
-                self.group_by("gameId", maintain_order=True)
-                .agg((pl.col("game_seconds_elapsed").diff().drop_nulls() < 0).any().alias("game_seconds_elapsed"))
-                .filter(pl.col("game_seconds_elapsed"))
-            )
-            if check.height > 0:
-                warnings.append(
-                    f"game_seconds_elapsed has minor reversals in {check.height} games "
-                    "(instant replay / memo events — not a pipeline bug)."
-                )
-
-        # --- value ranges ---
-        if "period" in self.columns:
-            pmin, pmax = int(self["period"].min()), int(self["period"].max())  # type: ignore[arg-type]
-            if pmin < 1 or pmax > 10:
-                errors.append(f"period out of range [1, 10]: min={pmin}, max={pmax}")
-
-        if "seconds_remaining" in self.columns:
-            if (self["seconds_remaining"] < 0).any():
-                errors.append("seconds_remaining has negative values.")
-
-        if "game_seconds_elapsed" in self.columns:
-            if (self["game_seconds_elapsed"] < 0).any():
-                errors.append("game_seconds_elapsed has negative values.")
-
-        if "scoreHome" in self.columns and "scoreAway" in self.columns:
-            if (self["scoreHome"] < 0).any() or (self["scoreAway"] < 0).any():
-                errors.append("Negative scores found.")
-
-        # --- enriched column checks ---
-        if "season" in self.columns:
-            valid_seasons = set(range(2020, 2030))
-            actual = set(self["season"].unique().to_list())
-            bad_seasons = actual - valid_seasons
-            if bad_seasons:
-                errors.append(f"Invalid season values: {bad_seasons}")
-
-        if "season_type" in self.columns:
-            actual_st = set(self["season_type"].unique().to_list())
-            if not actual_st.issubset({"rg", "po"}):
-                errors.append(f"Invalid season_type values: {actual_st - {'rg', 'po'}}")
-
-        if "IsPlayoff" in self.columns and "season_type" in self.columns:
-            mismatch = (
-                (self["IsPlayoff"] & (self["season_type"] != "po"))
-                | (~self["IsPlayoff"] & (self["season_type"] != "rg"))
-            ).sum()
-            if mismatch > 0:
-                errors.append(f"IsPlayoff/season_type mismatch: {mismatch:,} rows")
-
-        if "shot_value" in self.columns:
-            actual_sv = set(self["shot_value"].drop_nulls().unique().to_list())
-            if not actual_sv.issubset({1, 2, 3}):
-                errors.append(f"Invalid shot_value values: {actual_sv - {1, 2, 3}}")
-
-        if "points_scored" in self.columns:
-            actual_ps = set(self["points_scored"].unique().to_list())
-            if not actual_ps.issubset({0, 1, 2, 3}):
-                errors.append(f"Invalid points_scored values: {actual_ps - {0, 1, 2, 3}}")
-
-        if "score_margin" in self.columns:
-            expected_margin = self["scoreHome"] - self["scoreAway"]
-            if not (self["score_margin"] == expected_margin).all():
-                errors.append("score_margin != scoreHome - scoreAway")
-
-        if "is_clutch" in self.columns:
-            expected_clutch = (self["score_margin"].abs() <= 5) & (self["game_seconds_elapsed"] >= 2400.0)
-            if not (self["is_clutch"] == expected_clutch).all():
-                errors.append("is_clutch does not match definition (|margin| <= 5 AND elapsed >= 2400).")
-
-        if "possession_outcome" in self.columns:
-            outcomes = set(self["possession_outcome"].drop_nulls().unique().to_list())
-            fixed_outcomes = {o for o in outcomes if not o.startswith("ft_")}
-            unexpected = fixed_outcomes - self._VALID_OUTCOMES
-            if unexpected:
-                warnings.append(f"Unexpected possession_outcome values: {unexpected}")
-
-        if "possession_id" in self.columns and "possession_points" in self.columns:
-            has_pid = self["possession_id"].is_not_null()
-            has_ppts = self["possession_points"].is_not_null()
-            mismatch_n = (has_pid != has_ppts).sum()
-            if mismatch_n > 0:
-                warnings.append(f"possession_id/possession_points nullity mismatch: {mismatch_n:,} rows")
-
-        # --- report ---
-        for w in warnings:
-            print(f"  Warning: {w}")
-        if errors:
-            msg = "\n  ".join(errors)
-            raise AssertionError(f"Validation failed:\n  {msg}")
-        print(f"  Passed ({self.height:,} rows, {len(self.columns)} cols, {len(warnings)} warnings).")
