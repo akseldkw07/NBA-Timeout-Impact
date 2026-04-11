@@ -10,6 +10,7 @@ import polars as pl
 from kret_matplotlib.UTILS_Matplotlib import UTILS_Plotting as uks_mpl
 from kret_np_pd.UTILS_np_pd import NP_PD_Utils as UKS_NP_PD
 from plotly.subplots import make_subplots
+from scipy import stats as sp_stats
 
 if t.TYPE_CHECKING:
     from nba_timeout_impact.datasets.memo_cdnnba_pl import CDNNBAMemoPL
@@ -379,7 +380,7 @@ class NBAPlottingUtils:
             line_color="tomato",
             annotation_text=f"Weighted avg: {weighted_effect:+.3f} pts/{W}poss",
             annotation_position="top right",
-            row=2,
+            row=2,  # type: ignore
             col=1,  # type: ignore
         )
         fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=2, col=1)  # type: ignore
@@ -396,5 +397,364 @@ class NBAPlottingUtils:
             height=700,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
         )
+
+        return fig
+
+    # ------------------------------------------------------------------ #
+    #  Stoppage impact on runs (Plotly)                                    #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def plot_stoppage_run_impact(
+        cls,
+        memo: CDNNBAMemoPL,
+        run_size: int = 5,
+        minutes: float = 3.0,
+        location: t.Literal["home", "away"] | None = None,
+        margin: t.Literal["ahead", "behind"] | None = None,
+    ) -> go.Figure:
+        """Compare recovery from a scoring run after endogenous timeout,
+        exogenous stoppage, or no stoppage.
+
+        Shows overlaid histograms of the lead change (from the suffering
+        team's perspective) over the next *minutes*, plus a summary with
+        means, stds, and a significance test.
+
+        Parameters
+        ----------
+        memo : CDNNBAMemoPL
+        run_size : int
+            Minimum |streak| to qualify as a "run" (default 5).
+        minutes : float
+            Forward window in minutes to measure recovery (default 3).
+        location : "home" | "away" | None
+            Filter to runs where the suffering team is home or away.
+            None (default) includes both.
+        margin : "ahead" | "behind" | None
+            Filter by the suffering team's score margin at the time of the event.
+            "ahead" = suffering team is still winning despite the run.
+            "behind" = suffering team is trailing.
+            None (default) includes both.
+        """
+        filter_parts = []
+        if location:
+            filter_parts.append(f"suffering={location}")
+        if margin:
+            filter_parts.append(f"margin={margin}")
+        filter_label = f", {', '.join(filter_parts)}" if filter_parts else ""
+        print(f"Stoppage run impact: run>={run_size}, forward={minutes}min{filter_label}")
+        data = memo.stoppage_run_impact(run_size=run_size, minutes=minutes)
+
+        if location is not None:
+            data = data.filter(pl.col("suffering_location") == location)
+        if margin == "ahead":
+            data = data.filter(pl.col("suffering_margin") > 0)
+        elif margin == "behind":
+            data = data.filter(pl.col("suffering_margin") < 0)
+
+        endo = data.filter(pl.col("group") == "endogenous")["recovery"].to_numpy()
+        exo = data.filter(pl.col("group") == "exogenous")["recovery"].to_numpy()
+        ctrl = data.filter(pl.col("group") == "control")["recovery"].to_numpy()
+
+        groups = [
+            ("endogenous", endo, "rgba(255,99,71,0.6)", "Coach Timeout"),
+            ("exogenous", exo, "rgba(100,149,237,0.6)", "TV/Official Stoppage"),
+            ("control", ctrl, "rgba(150,150,150,0.4)", "No Stoppage"),
+        ]
+        groups = [(name, arr, color, label) for name, arr, color, label in groups if len(arr) > 0]
+
+        fig = make_subplots(
+            rows=1,
+            cols=2,
+            column_widths=[0.65, 0.35],
+            horizontal_spacing=0.12,
+            subplot_titles=[
+                f"Recovery Distribution ({minutes}min after run >= {run_size})",
+                "Mean Recovery (95% CI)",
+            ],
+        )
+
+        # --- Left panel: overlaid histograms ---
+        for name, arr, color, label in groups:
+            mu, sigma = float(np.mean(arr)), float(np.std(arr))
+            fig.add_trace(
+                go.Histogram(
+                    x=arr,
+                    histnorm="probability",
+                    name=f"{label} (n={len(arr):,}, \u03bc={mu:.3f}, \u03c3={sigma:.3f})",
+                    marker_color=color,
+                    opacity=0.7,
+                    hovertemplate="Recovery: %{x:.1f}<br>Probability: %{y:.3f}<extra>%{fullData.name}</extra>",
+                ),
+                row=1,
+                col=1,
+            )
+
+        fig.update_xaxes(title_text="Lead Change (suffering team's perspective)", row=1, col=1)
+        fig.update_yaxes(title_text="Probability", row=1, col=1)
+
+        # --- Right panel: mean + CI bar chart ---
+        labels = []
+        means = []
+        ci_lo = []
+        ci_hi = []
+        colors = []
+        for name, arr, color, label in groups:
+            mu = float(np.mean(arr))
+            se = float(np.std(arr) / np.sqrt(len(arr)))
+            labels.append(label)
+            means.append(mu)
+            ci_lo.append(mu - 1.96 * se)
+            ci_hi.append(mu + 1.96 * se)
+            colors.append(color)
+
+        fig.add_trace(
+            go.Bar(
+                x=labels,
+                y=means,
+                error_y=dict(
+                    type="data",
+                    symmetric=False,
+                    array=[h - m for h, m in zip(ci_hi, means)],
+                    arrayminus=[m - l for m, l in zip(means, ci_lo)],
+                ),
+                marker_color=colors,
+                hovertemplate="%{x}<br>Mean: %{y:.3f}<extra></extra>",
+                showlegend=False,
+            ),
+            row=1,
+            col=2,
+        )
+
+        fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=1, col=2)  # type: ignore
+        fig.update_yaxes(title_text="Mean Recovery (pts)", row=1, col=2)
+
+        # --- Significance tests ---
+        annotations = []
+        test_pairs = [
+            ("endogenous", "control", endo, ctrl),
+            ("exogenous", "control", exo, ctrl),
+            ("endogenous", "exogenous", endo, exo),
+        ]
+        for name_a, name_b, arr_a, arr_b in test_pairs:
+            if len(arr_a) > 0 and len(arr_b) > 0:
+                t_stat, p_val = sp_stats.ttest_ind(arr_a, arr_b, equal_var=False)
+                diff = float(np.mean(arr_a) - np.mean(arr_b))
+                sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else "n.s."  # type: ignore
+                annotations.append(f"{name_a} vs {name_b}: diff={diff:+.3f}, p={p_val:.4f} {sig}")
+
+        annotation_text = "<br>".join(annotations)
+        fig.add_annotation(
+            text=annotation_text,
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=-0.22,
+            xanchor="center",
+            yanchor="top",
+            showarrow=False,
+            font=dict(size=13, family="monospace"),
+            bgcolor="rgba(0,0,0,0.6)",
+            bordercolor="gray",
+            borderwidth=1,
+        )
+
+        fig.update_layout(
+            title_text=f"Scoring Run Recovery: Endogenous vs Exogenous vs No Stoppage<br>"
+            f"<sup>Run >= {run_size} pts | {minutes}min forward | "
+            f"Suffering team: {location or 'all'}"
+            f"{f' | {margin}' if margin else ''}</sup>",
+            barmode="overlay",
+            template="plotly_dark",
+            width=1400,
+            height=750,
+            font=dict(size=14),
+            title_font=dict(size=18),
+            legend=dict(
+                orientation="h",
+                yanchor="top",
+                y=1.12,
+                xanchor="center",
+                x=0.35,
+                font=dict(size=13),
+            ),
+            margin=dict(b=180, t=140, l=80, r=60),
+        )
+
+        # Increase subplot title font
+        for ann in fig.layout.annotations:  # type: ignore
+            if ann.text and ("Recovery" in ann.text or "Mean" in ann.text):
+                ann.font = dict(size=15)
+
+        return fig
+
+    # ------------------------------------------------------------------ #
+    #  Stoppage run impact — 2x2 grid (Plotly)                             #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def plot_stoppage_run_impact_grid(
+        cls,
+        memo: CDNNBAMemoPL,
+        run_size: int = 5,
+        minutes: float = 3.0,
+        max_abs_margin: int | None = None,
+    ) -> go.Figure:
+        """2x2 grid of mean recovery bar charts, split by home/away and ahead/behind.
+
+        Each subplot shows Coach Timeout vs TV/Official Stoppage vs No Stoppage
+        with 95% CI error bars.
+
+        Parameters
+        ----------
+        memo : CDNNBAMemoPL
+        run_size : int
+            Minimum |streak| to qualify as a "run" (default 5).
+        minutes : float
+            Forward window in minutes to measure recovery (default 3).
+        max_abs_margin : int or None
+            If set, only include events where |suffering_margin| <= this value
+            (i.e. close games only).
+        """
+        print(
+            f"Stoppage run impact grid: run>={run_size}, forward={minutes}min"
+            f"{f', |margin|<={max_abs_margin}' if max_abs_margin else ''}"
+        )
+        data = memo.stoppage_run_impact(run_size=run_size, minutes=minutes)
+
+        if max_abs_margin is not None:
+            data = data.filter(pl.col("suffering_margin").abs() <= max_abs_margin)
+
+        panel_specs = [
+            ("home", "ahead", "Home & Ahead"),
+            ("away", "ahead", "Away & Ahead"),
+            ("home", "behind", "Home & Behind"),
+            ("away", "behind", "Away & Behind"),
+        ]
+
+        fig = make_subplots(
+            rows=2,
+            cols=2,
+            subplot_titles=[s[2] for s in panel_specs],
+            vertical_spacing=0.22,
+            horizontal_spacing=0.14,
+        )
+
+        group_defs = [
+            ("endogenous", "rgba(255,99,71,0.7)", "Coach TO"),
+            ("exogenous", "rgba(100,149,237,0.7)", "TV/Official"),
+            ("control", "rgba(150,150,150,0.5)", "No Stoppage"),
+        ]
+
+        sig_lines: list[str] = []
+        all_y_lo: list[float] = []
+        all_y_hi: list[float] = []
+
+        for idx, (loc, mar, title) in enumerate(panel_specs):
+            row = idx // 2 + 1
+            col = idx % 2 + 1
+
+            if mar == "ahead":
+                panel_data = data.filter((pl.col("suffering_location") == loc) & (pl.col("suffering_margin") > 0))
+            else:
+                panel_data = data.filter((pl.col("suffering_location") == loc) & (pl.col("suffering_margin") < 0))
+
+            labels = []
+            means = []
+            errors_plus = []
+            errors_minus = []
+            colors = []
+            arrays: dict[str, np.ndarray] = {}
+
+            for gname, gcolor, glabel in group_defs:
+                arr = panel_data.filter(pl.col("group") == gname)["recovery"].to_numpy()
+                arrays[gname] = arr
+                if len(arr) == 0:
+                    continue
+                mu = float(np.mean(arr))
+                se = float(np.std(arr) / np.sqrt(len(arr)))
+                labels.append(f"{glabel}\nn={len(arr):,}")
+                means.append(mu)
+                errors_plus.append(1.96 * se)
+                errors_minus.append(1.96 * se)
+                colors.append(gcolor)
+
+            # Track global y range
+            for m, ep, em in zip(means, errors_plus, errors_minus):
+                all_y_hi.append(m + ep)
+                all_y_lo.append(m - em)
+
+            fig.add_trace(
+                go.Bar(
+                    x=labels,
+                    y=means,
+                    error_y=dict(type="data", symmetric=False, array=errors_plus, arrayminus=errors_minus),
+                    marker_color=colors,
+                    hovertemplate="%{x}<br>Mean: %{y:.3f}<extra></extra>",
+                    showlegend=(idx == 0),
+                    name="Recovery",
+                ),
+                row=row,
+                col=col,
+            )
+
+            fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=row, col=col)  # type: ignore
+            fig.update_yaxes(title_text="Mean Recovery (pts)" if col == 1 else "", row=row, col=col)
+
+            # Significance: endo vs ctrl
+            endo_arr = arrays.get("endogenous", np.array([]))
+            ctrl_arr = arrays.get("control", np.array([]))
+            exo_arr = arrays.get("exogenous", np.array([]))
+            if len(endo_arr) > 30 and len(ctrl_arr) > 30:
+                _, p_ec = sp_stats.ttest_ind(endo_arr, ctrl_arr, equal_var=False)
+                diff_ec = float(np.mean(endo_arr) - np.mean(ctrl_arr))
+                sig_ec = "***" if p_ec < 0.001 else "**" if p_ec < 0.01 else "*" if p_ec < 0.05 else "n.s."  # type: ignore
+                sig_lines.append(
+                    f"{title}: TO vs Ctrl {diff_ec:+.3f} (p={p_ec:.3f}{sig_ec})"
+                    f"  |  TV vs Ctrl {float(np.mean(exo_arr) - np.mean(ctrl_arr)):+.3f}"
+                )
+
+        # Set consistent y-axis range across all panels
+        if all_y_lo and all_y_hi:
+            y_pad = (max(all_y_hi) - min(all_y_lo)) * 0.15
+            y_range = [min(all_y_lo) - y_pad, max(all_y_hi) + y_pad]
+            for r in range(1, 3):
+                for c in range(1, 3):
+                    fig.update_yaxes(range=y_range, row=r, col=c)
+
+        margin_label = f" | |margin| <= {max_abs_margin}" if max_abs_margin else ""
+        fig.update_layout(
+            title_text=f"Scoring Run Recovery by Situation<br>"
+            f"<sup>Run >= {run_size} pts | {minutes}min forward{margin_label} | 95% CI</sup>",
+            template="plotly_dark",
+            width=1200,
+            height=900,
+            font=dict(size=14),
+            title_font=dict(size=18),
+            showlegend=False,
+            margin=dict(b=160, t=120, l=80, r=60),
+        )
+
+        # Significance summary at bottom
+        fig.add_annotation(
+            text="<br>".join(sig_lines),
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=-0.15,
+            xanchor="center",
+            yanchor="top",
+            showarrow=False,
+            font=dict(size=12, family="monospace"),
+            bgcolor="rgba(0,0,0,0.6)",
+            bordercolor="gray",
+            borderwidth=1,
+        )
+
+        # Increase subplot title font
+        for ann in fig.layout.annotations:  # type: ignore
+            for keyword in panel_specs:
+                if ann.text == keyword[2]:
+                    ann.font = dict(size=15)
 
         return fig

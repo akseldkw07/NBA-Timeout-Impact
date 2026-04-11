@@ -11,6 +11,7 @@ import typing as t
 
 import polars as pl
 from kret_polars.memo_df_pl import InputTypedDictPL, MemoDataFramePL, memo_fn, memo_series
+from scipy import stats as sp_stats
 
 from .enriched_boxscores import BoxscoresDatasetPL
 from .enriched_cdnnba import CDNNBADatasetPL
@@ -344,7 +345,6 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         return self._df_dict[key]
 
     def _compute_timeout_counterfactual(self) -> pl.DataFrame:
-        from scipy import stats as sp_stats
 
         W = self._COUNTERFACTUAL_WINDOW
         poss = self.possessions
@@ -438,6 +438,165 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         total_to = merged["to_n"].sum()
         print(f"  Causal effect: {weighted:+.4f} pts over {W} possessions ({W // 2} per team), n={total_to:,}")
         return merged
+
+    # ------------------------------------------------------------------ #
+    #  Home team lookup                                                    #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def home_team_per_game(self) -> pl.DataFrame:
+        """One row per gameId with the home team's teamId.
+
+        Derived from scoring events where scoreHome increases.
+        Cached in ``_df_dict``.
+        """
+        key = "_home_team_per_game"
+        if key not in self._df_dict:
+            df = pl.DataFrame._from_pydf(self.cdnnba._df)
+            scoring = df.filter((pl.col("points_scored") > 0) & (pl.col("teamId") > 0))
+            scoring = scoring.with_columns(pl.col("scoreHome").diff().over("gameId").alias("_hd"))
+            self._df_dict[key] = (
+                scoring.filter(pl.col("_hd") > 0).select("gameId", pl.col("teamId").alias("home_teamId")).unique()
+            )
+        return self._df_dict[key]
+
+    # ------------------------------------------------------------------ #
+    #  Stoppage impact on runs                                             #
+    # ------------------------------------------------------------------ #
+
+    def stoppage_run_impact(self, run_size: int = 5, minutes: float = 3.0) -> pl.DataFrame:
+        """Compare recovery after endogenous timeout, exogenous stoppage, or no stoppage
+        when a team is suffering a scoring run.
+
+        For every spine event during a run of |streak| >= *run_size*, classifies
+        it as endogenous (coach timeout by suffering team), exogenous (TV timeout
+        or stoppage), or control (no stoppage). Then measures lead change over the
+        next *minutes* from the suffering team's perspective.
+
+        Returns a DataFrame with columns:
+            group ("endogenous", "exogenous", "control"),
+            recovery (lead change from suffering team's perspective),
+            streak_at_event, gameId, game_seconds_elapsed
+
+        NOT cached — recomputed each call since parameters vary.
+        """
+        df = pl.DataFrame._from_pydf(self.cdnnba._df)
+        streak_s = self.streak
+        lead_s = self.lead
+        lead_fwd = self.lead_change_n_mins(minutes)
+        home_teams = self.home_team_per_game
+
+        analysis = pl.DataFrame(
+            {
+                "gameId": df["gameId"],
+                "game_seconds_elapsed": df["game_seconds_elapsed"],
+                "actionType": df["actionType"],
+                "subType": df["subType"],
+                "teamId": df["teamId"],
+                "streak": streak_s,
+                "lead": lead_s,
+                "lead_change": lead_fwd,
+            }
+        ).join(home_teams, on="gameId", how="left")
+
+        # Filter to events during a run
+        analysis = analysis.filter(pl.col("streak").abs() >= run_size)
+        # Drop rows where we can't measure forward impact
+        analysis = analysis.filter(pl.col("lead_change").is_not_null())
+
+        # From suffering team's perspective:
+        # streak > 0 → home running, away suffering → flip sign
+        # streak < 0 → away running, home suffering → keep sign
+        analysis = analysis.with_columns(
+            (-pl.col("streak").sign() * pl.col("lead_change")).alias("recovery"),
+            # Margin from suffering team's perspective (positive = suffering team ahead)
+            (-pl.col("streak").sign() * pl.col("lead")).alias("suffering_margin"),
+        )
+
+        # Classify events
+        is_timeout = pl.col("actionType") == "timeout"
+        is_endogenous_sub = pl.col("subType").is_in(["full", "challenge"])
+        is_exogenous_sub = pl.col("subType") == "official_inferred"
+        is_stoppage = pl.col("actionType") == "stoppage"
+
+        # For endogenous: timeout called by the SUFFERING team
+        # streak > 0 (home running) → suffering = away → timeout teamId != home
+        # streak < 0 (away running) → suffering = home → timeout teamId == home
+        suffering_called = ((pl.col("streak") > 0) & (pl.col("teamId") != pl.col("home_teamId"))) | (
+            (pl.col("streak") < 0) & (pl.col("teamId") == pl.col("home_teamId"))
+        )
+
+        analysis = analysis.with_columns(
+            pl.when(is_timeout & is_endogenous_sub & suffering_called)
+            .then(pl.lit("endogenous"))
+            .when(is_timeout & is_exogenous_sub)
+            .then(pl.lit("exogenous"))
+            .when(is_stoppage)
+            .then(pl.lit("exogenous"))
+            .otherwise(pl.lit("control"))
+            .alias("group")
+        )
+
+        # De-duplicate: for control, we have many events per run — sample one per
+        # (gameId, run segment) to avoid over-counting.
+        # For timeouts/stoppages, keep all (they're sparse).
+        # A "run segment" is a contiguous block of the same streak sign within a game.
+        analysis = analysis.with_columns(
+            pl.col("streak").sign().alias("_streak_sign"),
+        ).with_columns(
+            (
+                (pl.col("_streak_sign") != pl.col("_streak_sign").shift(1))
+                | (pl.col("gameId") != pl.col("gameId").shift(1))
+            )
+            .cum_sum()
+            .alias("_run_segment")
+        )
+
+        # For control: take the FIRST event in each run segment (the moment the run reaches threshold)
+        control = (
+            analysis.filter(pl.col("group") == "control")
+            .group_by("gameId", "_run_segment", maintain_order=True)
+            .first()
+        )
+        non_control = analysis.filter(pl.col("group") != "control")
+
+        # Tag whether the suffering team is home or away
+        # streak > 0 → home running → suffering = away
+        # streak < 0 → away running → suffering = home
+        non_control = non_control.with_columns(
+            pl.when(pl.col("streak") > 0).then(pl.lit("away")).otherwise(pl.lit("home")).alias("suffering_location")
+        )
+        control = control.with_columns(
+            pl.when(pl.col("streak") > 0).then(pl.lit("away")).otherwise(pl.lit("home")).alias("suffering_location")
+        )
+
+        cols = [
+            "group",
+            "recovery",
+            pl.col("streak").alias("streak_at_event"),
+            "gameId",
+            "game_seconds_elapsed",
+            "suffering_location",
+            "suffering_margin",
+        ]
+        result = pl.concat(
+            [
+                non_control.select(cols),
+                control.select(cols),
+            ]
+        )
+
+        for g in ["endogenous", "exogenous", "control"]:
+            grp = result.filter(pl.col("group") == g)
+            if grp.height > 0:
+                print(
+                    f"  {g}: n={grp.height:,}, recovery mean={grp['recovery'].mean():.3f}, "
+                    f"std={grp['recovery'].std():.3f}"
+                )
+            else:
+                print(f"  {g}: no data")
+
+        return result
 
     # ------------------------------------------------------------------ #
     #  Pointer memo series — row indices into supplemental datasets        #
