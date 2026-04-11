@@ -312,6 +312,134 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         return self._df_dict[key]
 
     # ------------------------------------------------------------------ #
+    #  Counterfactual timeout analysis                                     #
+    # ------------------------------------------------------------------ #
+
+    # Window size for trailing/forward possession windows.
+    # Even number so each team gets exactly half the possessions.
+    _COUNTERFACTUAL_WINDOW = 6
+
+    @property
+    def timeout_counterfactual(self) -> pl.DataFrame:
+        """Bucket-matched comparison of post-timeout vs non-timeout outcomes.
+
+        For every possession, computes the trailing and forward N-possession
+        net (N = _COUNTERFACTUAL_WINDOW, default 6) from that team's perspective.
+        Uses an even window so each team gets exactly N/2 possessions.
+
+        Timeouts are matched to non-timeout possessions with the same
+        trailing net (rounded to nearest integer).
+
+        Returns a DataFrame with one row per trailing_net bucket:
+            trail_bucket, to_fwd_mean, to_fwd_std, to_n,
+            ctrl_fwd_mean, ctrl_fwd_std, ctrl_n,
+            causal_effect, p_value
+
+        Cached in ``_df_dict`` on first access.
+        """
+        key = "_timeout_counterfactual"
+        if key not in self._df_dict:
+            print("Computing timeout_counterfactual...")
+            self._df_dict[key] = self._compute_timeout_counterfactual()
+        return self._df_dict[key]
+
+    def _compute_timeout_counterfactual(self) -> pl.DataFrame:
+        from scipy import stats as sp_stats
+
+        W = self._COUNTERFACTUAL_WINDOW
+        poss = self.possessions
+        df = pl.DataFrame._from_pydf(self.cdnnba._df)
+
+        # Build lag/lead columns for every possession
+        p = poss.select("gameId", "possession_id", "possession_points", "possession").sort("gameId", "possession_id")
+        for i in range(1, W + 1):
+            p = p.with_columns(
+                pl.col("possession_points").shift(i).over("gameId").alias(f"pts_lag{i}"),
+                pl.col("possession").shift(i).over("gameId").alias(f"tm_lag{i}"),
+                pl.col("possession_points").shift(-i).over("gameId").alias(f"pts_lead{i}"),
+                pl.col("possession").shift(-i).over("gameId").alias(f"tm_lead{i}"),
+            )
+
+        # Trailing/forward net from possessor's perspective
+        trail_for = pl.lit(0)
+        trail_ag = pl.lit(0)
+        fwd_for = pl.lit(0)
+        fwd_ag = pl.lit(0)
+        for i in range(1, W + 1):
+            same = pl.col(f"tm_lag{i}") == pl.col("possession")
+            trail_for = trail_for + pl.when(same).then(pl.col(f"pts_lag{i}")).otherwise(0)
+            trail_ag = trail_ag + pl.when(~same).then(pl.col(f"pts_lag{i}")).otherwise(0)
+            same_f = pl.col(f"tm_lead{i}") == pl.col("possession")
+            fwd_for = fwd_for + pl.when(same_f).then(pl.col(f"pts_lead{i}")).otherwise(0)
+            fwd_ag = fwd_ag + pl.when(~same_f).then(pl.col(f"pts_lead{i}")).otherwise(0)
+
+        p = p.with_columns(
+            (trail_for - trail_ag).alias("trailing_net"),
+            (fwd_for - fwd_ag).alias("forward_net"),
+        ).drop_nulls(subset=[f"pts_lag{W}", f"pts_lead{W}"])
+
+        # Split into timeout and non-timeout possessions
+        timeout_keys = (
+            df.filter((pl.col("actionType") == "timeout") & (pl.col("subType") == "full"))
+            .select("gameId", "possession_id", pl.col("teamId").alias("timeout_team"))
+            .unique()
+        )
+
+        p_to = p.join(timeout_keys, on=["gameId", "possession_id"], how="inner").with_columns(
+            # Flip net if timeout_team != possession at this row
+            pl.when(pl.col("timeout_team") == pl.col("possession"))
+            .then(pl.col("trailing_net"))
+            .otherwise(-pl.col("trailing_net"))
+            .alias("trailing_net"),
+            pl.when(pl.col("timeout_team") == pl.col("possession"))
+            .then(pl.col("forward_net"))
+            .otherwise(-pl.col("forward_net"))
+            .alias("forward_net"),
+        )
+        p_ctrl = p.join(timeout_keys.select("gameId", "possession_id"), on=["gameId", "possession_id"], how="anti")
+
+        print(f"  Window: {W} possessions ({W // 2} per team)")
+        print(f"  Timeout possessions: {p_to.height:,}, control: {p_ctrl.height:,}")
+
+        # Bucket and compare
+        to_bucketed = p_to.with_columns(pl.col("trailing_net").round(0).cast(pl.Int32).alias("trail_bucket"))
+        ctrl_bucketed = p_ctrl.with_columns(pl.col("trailing_net").round(0).cast(pl.Int32).alias("trail_bucket"))
+
+        to_agg = to_bucketed.group_by("trail_bucket").agg(
+            pl.col("forward_net").mean().alias("to_fwd_mean"),
+            pl.col("forward_net").std().alias("to_fwd_std"),
+            pl.col("forward_net").len().alias("to_n"),
+        )
+        ctrl_agg = ctrl_bucketed.group_by("trail_bucket").agg(
+            pl.col("forward_net").mean().alias("ctrl_fwd_mean"),
+            pl.col("forward_net").std().alias("ctrl_fwd_std"),
+            pl.col("forward_net").len().alias("ctrl_n"),
+        )
+
+        merged = to_agg.join(ctrl_agg, on="trail_bucket", how="inner").sort("trail_bucket")
+        merged = merged.filter((pl.col("to_n") >= 50) & (pl.col("ctrl_n") >= 50))
+        merged = merged.with_columns(
+            (pl.col("to_fwd_mean") - pl.col("ctrl_fwd_mean")).alias("causal_effect"),
+        )
+
+        # Compute p-values per bucket via Welch's t-test
+        p_values = []
+        for row in merged.iter_rows(named=True):
+            b = row["trail_bucket"]
+            to_vals = to_bucketed.filter(pl.col("trail_bucket") == b)["forward_net"].to_numpy()
+            ctrl_vals = ctrl_bucketed.filter(pl.col("trail_bucket") == b)["forward_net"].to_numpy()
+            _, pval = sp_stats.ttest_ind(to_vals, ctrl_vals, equal_var=False)
+            p_values.append(pval)
+
+        merged = merged.with_columns(pl.Series("p_value", p_values))
+
+        # Compute overall weighted causal estimate
+        weighted = (merged["causal_effect"] * merged["to_n"]).sum() / merged["to_n"].sum()  # type: ignore
+        total_to = merged["to_n"].sum()
+        print(f"  Causal effect: {weighted:+.4f} pts over {W} possessions ({W // 2} per team), n={total_to:,}")
+        return merged
+
+    # ------------------------------------------------------------------ #
     #  Pointer memo series — row indices into supplemental datasets        #
     #                                                                      #
     #  Each ptr_* returns a pl.Series(UInt32) aligned to the spine.        #

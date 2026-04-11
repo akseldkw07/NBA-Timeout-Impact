@@ -233,3 +233,168 @@ class NBAPlottingUtils:
         )
 
         return fig
+
+    # ------------------------------------------------------------------ #
+    #  Counterfactual timeout impact (Plotly)                              #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def plot_timeout_causal_effect(cls, memo: CDNNBAMemoPL) -> go.Figure:
+        """Visualize the causal effect of timeouts vs matched controls.
+
+        Top panel: forward N-possession net for timeout vs control groups,
+        plotted against trailing N-possession net (the "situation" at timeout).
+        N is even (default 6) so each team gets exactly N/2 possessions.
+        Bottom panel: causal effect (timeout - control) per bucket with
+        significance markers.
+
+        Uses ``memo.timeout_counterfactual`` for the data.
+        """
+        cf = memo.timeout_counterfactual
+        W = memo._COUNTERFACTUAL_WINDOW
+        half = W // 2
+
+        buckets = cf["trail_bucket"].to_numpy()
+        to_mean = cf["to_fwd_mean"].to_numpy()
+        ctrl_mean = cf["ctrl_fwd_mean"].to_numpy()
+        to_std = cf["to_fwd_std"].to_numpy()
+        ctrl_std = cf["ctrl_fwd_std"].to_numpy()
+        to_n = cf["to_n"].to_numpy()
+        ctrl_n = cf["ctrl_n"].to_numpy()
+        effect = cf["causal_effect"].to_numpy()
+        pvals = cf["p_value"].to_numpy()
+
+        # Standard error for CI bands
+        to_se = to_std / np.sqrt(to_n)
+        ctrl_se = ctrl_std / np.sqrt(ctrl_n)
+
+        # Weighted overall effect
+        weighted_effect = float(np.sum(effect * to_n) / np.sum(to_n))
+
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            row_heights=[0.6, 0.4],
+            shared_xaxes=True,
+            vertical_spacing=0.08,
+            subplot_titles=[
+                f"Forward {W}-Possession Net: Timeout vs Matched Control ({half} per team)",
+                "Causal Effect (Timeout \u2212 Control)",
+            ],
+        )
+
+        # --- Top panel: two lines with CI bands ---
+
+        # Control CI band
+        fig.add_trace(
+            go.Scatter(
+                x=np.concatenate([buckets, buckets[::-1]]),
+                y=np.concatenate([ctrl_mean + 1.96 * ctrl_se, (ctrl_mean - 1.96 * ctrl_se)[::-1]]),
+                fill="toself",
+                fillcolor="rgba(100,149,237,0.15)",
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+
+        # Timeout CI band
+        fig.add_trace(
+            go.Scatter(
+                x=np.concatenate([buckets, buckets[::-1]]),
+                y=np.concatenate([to_mean + 1.96 * to_se, (to_mean - 1.96 * to_se)[::-1]]),
+                fill="toself",
+                fillcolor="rgba(255,99,71,0.15)",
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=1,
+            col=1,
+        )
+
+        # Control line
+        fig.add_trace(
+            go.Scatter(
+                x=buckets,
+                y=ctrl_mean,
+                mode="lines+markers",
+                name="No timeout (control)",
+                line=dict(color="cornflowerblue", width=2),
+                marker=dict(size=5),
+                hovertemplate="Trailing net: %{x}<br>Forward net: %{y:.3f}<br>"
+                "n=%{customdata:,}<extra>Control</extra>",
+                customdata=ctrl_n,
+            ),
+            row=1,
+            col=1,
+        )
+
+        # Timeout line
+        fig.add_trace(
+            go.Scatter(
+                x=buckets,
+                y=to_mean,
+                mode="lines+markers",
+                name="After timeout",
+                line=dict(color="tomato", width=2),
+                marker=dict(size=5),
+                hovertemplate="Trailing net: %{x}<br>Forward net: %{y:.3f}<br>"
+                "n=%{customdata:,}<extra>Timeout</extra>",
+                customdata=to_n,
+            ),
+            row=1,
+            col=1,
+        )
+
+        # Zero line
+        fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=1, col=1)  # type: ignore
+
+        # --- Bottom panel: causal effect bars ---
+        bar_colors = ["rgba(34,139,34,0.7)" if p < 0.05 else "rgba(150,150,150,0.5)" for p in pvals]
+        sig_text = ["*" if p < 0.05 else "" for p in pvals]
+
+        fig.add_trace(
+            go.Bar(
+                x=buckets,
+                y=effect,
+                marker_color=bar_colors,
+                hovertemplate="Trailing net: %{x}<br>Causal effect: %{y:+.3f}<br>" "p=%{customdata:.4f}<extra></extra>",
+                customdata=pvals,
+                showlegend=False,
+                text=sig_text,
+                textposition="outside",
+                textfont=dict(size=10),
+            ),
+            row=2,
+            col=1,
+        )
+
+        # Weighted average line
+        fig.add_hline(
+            y=weighted_effect,
+            line_dash="dash",
+            line_color="tomato",
+            annotation_text=f"Weighted avg: {weighted_effect:+.3f} pts/{W}poss",
+            annotation_position="top right",
+            row=2,
+            col=1,  # type: ignore
+        )
+        fig.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.5, row=2, col=1)  # type: ignore
+
+        fig.update_xaxes(title_text=f"Trailing {W}-Possession Net (caller's perspective)", row=2, col=1)
+        fig.update_yaxes(title_text=f"Forward {W}-Poss Net", row=1, col=1)
+        fig.update_yaxes(title_text="Effect (pts)", row=2, col=1)
+
+        fig.update_layout(
+            title_text="Causal Effect of Coach Timeouts on Scoring<br>"
+            f"<sup>Matched by trailing {W}-possession net ({half} per team) | 95% CI bands | * = p < 0.05</sup>",
+            template="plotly_dark",
+            width=900,
+            height=700,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        )
+
+        return fig
