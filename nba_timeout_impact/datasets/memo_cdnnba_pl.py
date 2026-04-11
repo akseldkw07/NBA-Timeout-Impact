@@ -7,16 +7,11 @@ Usage:
     memo = CDNNBAMemoPL.load_all()
 """
 
-import typing as t
-from pathlib import Path
-
 import polars as pl
-from kret_polars.enriched_df_pl import Enriched_DF_PL
-from kret_polars.memo_df_pl import InputTypedDictPL, MemoDataFramePL, memo_fn, memo_series
+from kret_polars.memo_df_pl import InputTypedDictPL, MemoDataFramePL, memo_series
 
-from nba_timeout_impact.constants import NBAConstants
-from .enriched_cdnnba import CDNNBADatasetPL
 from .enriched_boxscores import BoxscoresDatasetPL
+from .enriched_cdnnba import CDNNBADatasetPL
 from .enriched_player_advanced_stats import PlayerAdvancedStatsDatasetPL
 from .enriched_player_season_stats import PlayerSeasonStatsDatasetPL
 from .enriched_rotations import RotationsDatasetPL
@@ -65,14 +60,16 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
     @classmethod
     def load_all(cls) -> "CDNNBAMemoPL":
         """Load all datasets from parquet and return a fully-initialized CDNNBAMemoPL."""
-        return cls({
-            "data": CDNNBADatasetPL.load_from_parquet(),
-            "boxscores": BoxscoresDatasetPL.load_from_parquet(),
-            "player_advanced_stats": PlayerAdvancedStatsDatasetPL.load_from_parquet(),
-            "player_season_stats": PlayerSeasonStatsDatasetPL.load_from_parquet(),
-            "rotations": RotationsDatasetPL.load_from_parquet(),
-            "stints": StintsDatasetPL.load_from_parquet(),
-        })
+        return cls(
+            {
+                "data": CDNNBADatasetPL.load_from_parquet(),
+                "boxscores": BoxscoresDatasetPL.load_from_parquet(),
+                "player_advanced_stats": PlayerAdvancedStatsDatasetPL.load_from_parquet(),
+                "player_season_stats": PlayerSeasonStatsDatasetPL.load_from_parquet(),
+                "rotations": RotationsDatasetPL.load_from_parquet(),
+                "stints": StintsDatasetPL.load_from_parquet(),
+            }
+        )
 
     # ------------------------------------------------------------------ #
     #  Pointer memo series — row indices into supplemental datasets        #
@@ -87,11 +84,7 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         Null where personId == 0 or no boxscore match.
         """
         spine = self.cdnnba.select("gameId", "personId")
-        box = (
-            pl.DataFrame._from_pydf(self.boxscores._df)
-            .select("gameId", "personId")
-            .with_row_index("_ptr")
-        )
+        box = pl.DataFrame._from_pydf(self.boxscores._df).select("gameId", "personId").with_row_index("_ptr")
         return spine.join(box, on=["gameId", "personId"], how="left", coalesce=True)["_ptr"]
 
     @memo_series
@@ -134,26 +127,19 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         """Row index into stints for each spine row. Uses join_asof on
         (gameId, personId) with in_game_seconds <= game_seconds_elapsed < out_game_seconds.
         """
-        spine = (
-            self.cdnnba
-            .select("gameId", "personId", "game_seconds_elapsed")
-            .with_row_index("_spine_idx")
-        )
+        spine = self.cdnnba.select("gameId", "personId", "game_seconds_elapsed").with_row_index("_spine_idx")
         st = (
             pl.DataFrame._from_pydf(self.stints._df)
             .with_row_index("_ptr")
             .select("gameId", "personId", "in_game_seconds", "out_game_seconds", "_ptr")
             .sort("gameId", "personId", "in_game_seconds")
         )
-        joined = (
-            spine.sort("gameId", "personId", "game_seconds_elapsed")
-            .join_asof(
-                st,
-                left_on="game_seconds_elapsed",
-                right_on="in_game_seconds",
-                by=["gameId", "personId"],
-                strategy="backward",
-            )
+        joined = spine.sort("gameId", "personId", "game_seconds_elapsed").join_asof(
+            st,
+            left_on="game_seconds_elapsed",
+            right_on="in_game_seconds",
+            by=["gameId", "personId"],
+            strategy="backward",
         )
         # Null out pointer where game_seconds_elapsed is past the stint's out time
         joined = joined.with_columns(
@@ -169,11 +155,7 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         """Row index into rotations for each spine row. Uses join_asof on
         (gameId, personId) with IN_TIME_REAL/10 <= game_seconds_elapsed < OUT_TIME_REAL/10.
         """
-        spine = (
-            self.cdnnba
-            .select("gameId", "personId", "game_seconds_elapsed")
-            .with_row_index("_spine_idx")
-        )
+        spine = self.cdnnba.select("gameId", "personId", "game_seconds_elapsed").with_row_index("_spine_idx")
         rot = (
             pl.DataFrame._from_pydf(self.rotations._df)
             .with_row_index("_ptr")
@@ -185,15 +167,12 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
             .select("gameId", "personId", "in_seconds", "out_seconds", "_ptr")
             .sort("gameId", "personId", "in_seconds")
         )
-        joined = (
-            spine.sort("gameId", "personId", "game_seconds_elapsed")
-            .join_asof(
-                rot,
-                left_on="game_seconds_elapsed",
-                right_on="in_seconds",
-                by=["gameId", "personId"],
-                strategy="backward",
-            )
+        joined = spine.sort("gameId", "personId", "game_seconds_elapsed").join_asof(
+            rot,
+            left_on="game_seconds_elapsed",
+            right_on="in_seconds",
+            by=["gameId", "personId"],
+            strategy="backward",
         )
         # Null out pointer where game_seconds_elapsed is past the rotation's out time
         joined = joined.with_columns(

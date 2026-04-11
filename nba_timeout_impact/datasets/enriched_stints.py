@@ -3,6 +3,7 @@ from pathlib import Path
 
 import polars as pl
 from kret_polars.enriched_df_pl import Enriched_DF_PL
+
 from nba_timeout_impact.constants import NBAConstants
 
 
@@ -62,8 +63,16 @@ class StintsDatasetPL(Enriched_DF_PL):
             errors.append(f"Missing columns: {missing}")
 
         # --- no-null key columns ---
-        for col in ["gameId", "personId", "teamId", "season", "season_type", "stint_id",
-                     "in_game_seconds", "out_game_seconds"]:
+        for col in [
+            "gameId",
+            "personId",
+            "teamId",
+            "season",
+            "season_type",
+            "stint_id",
+            "in_game_seconds",
+            "out_game_seconds",
+        ]:
             if col in self.columns:
                 n_null = self[col].null_count()
                 if n_null > 0:
@@ -73,7 +82,9 @@ class StintsDatasetPL(Enriched_DF_PL):
         if "in_game_seconds" in self.columns and "out_game_seconds" in self.columns:
             bad_range = (self["out_game_seconds"] < self["in_game_seconds"]).sum()
             if bad_range > 0:
-                warnings.append(f"out_game_seconds < in_game_seconds in {bad_range:,} rows (zero-minute / data quirks).")
+                warnings.append(
+                    f"out_game_seconds < in_game_seconds in {bad_range:,} rows (zero-minute / data quirks)."
+                )
 
             if (self["in_game_seconds"] < 0).any():
                 errors.append("Negative in_game_seconds values.")
