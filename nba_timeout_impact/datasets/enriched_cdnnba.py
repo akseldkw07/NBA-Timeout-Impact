@@ -117,9 +117,174 @@ class CDNNBADatasetPL(Enriched_DF_PL):
     def load_from_parquet(cls, path: str | Path | None = None) -> "CDNNBADatasetPL":
         path = path or NBAConstants.NBA_DATA_DIR / "cdnnba_enriched.parquet"
         df = pl.read_parquet(path)
+        df = cls._inject_tv_timeouts(df)
         ret = cls(df)
         ret.validate_data()
         return ret
+
+    # ------------------------------------------------------------------ #
+    #  Inferred TV / official timeouts                                     #
+    # ------------------------------------------------------------------ #
+    #
+    # cdnnba only logs coach-called timeouts ("full", "challenge").
+    # NBA rules mandate ~2 TV timeouts per quarter at first dead ball
+    # under 6:59 and 2:59 remaining.  We detect these by finding moments
+    # where real-world time (timeActual) advances >> game clock, with no
+    # logged timeout.  Injected rows have actionType="timeout",
+    # subType="official_inferred".
+
+    _TV_TIMEOUT_MIN_EXCESS_SEC = 90.0
+
+    @staticmethod
+    def _infer_tv_timeouts(df: pl.DataFrame) -> pl.DataFrame:
+        """Detect TV/official timeouts from real-time vs game-clock gaps.
+
+        Returns a DataFrame of new rows (one per inferred timeout) with
+        the same schema as *df*, ready to be concatenated.
+        """
+        spine = df.select(
+            "gameId",
+            "game_date",
+            "period",
+            "game_seconds_elapsed",
+            "seconds_remaining",
+            "seconds_elapsed",
+            "timeActual",
+            "actionType",
+            "orderNumber",
+            "scoreHome",
+            "scoreAway",
+            "possession",
+            "IsPlayoff",
+            "periodType",
+            "season",
+            "season_type",
+            "personId",
+            "points_scored",
+            "score_margin",
+            "is_clutch",
+            "possession_id",
+        ).sort("gameId", "orderNumber")
+
+        # Assign moment_id: contiguous events at the same game clock
+        spine = spine.with_columns(
+            (
+                (pl.col("game_seconds_elapsed") != pl.col("game_seconds_elapsed").shift(1))
+                | (pl.col("gameId") != pl.col("gameId").shift(1))
+            )
+            .cum_sum()
+            .alias("moment_id")
+        )
+
+        # Aggregate each moment
+        moments = (
+            spine.group_by("moment_id")
+            .agg(
+                pl.col("gameId").first(),
+                pl.col("game_date").first(),
+                pl.col("period").first(),
+                pl.col("game_seconds_elapsed").first().alias("gse"),
+                pl.col("seconds_remaining").first(),
+                pl.col("seconds_elapsed").first(),
+                pl.col("timeActual").min().alias("time_start"),
+                pl.col("timeActual").max().alias("time_end"),
+                pl.col("orderNumber").first().alias("order_before"),
+                pl.col("possession_id").last().alias("possession_id"),
+                pl.col("scoreHome").first(),
+                pl.col("scoreAway").first(),
+                pl.col("possession").first(),
+                pl.col("IsPlayoff").first(),
+                pl.col("periodType").first(),
+                pl.col("season").first(),
+                pl.col("season_type").first(),
+                pl.col("score_margin").first(),
+                pl.col("is_clutch").first(),
+                (pl.col("actionType") == "timeout").any().alias("has_timeout"),
+                (pl.col("actionType") == "period").any().alias("has_period"),
+            )
+            .sort("moment_id")
+        )
+
+        # Compute real-time excess between consecutive moments
+        game_boundary = moments["gameId"] != moments["gameId"].shift(1)
+        gap_real = (
+            pl.when(~game_boundary)
+            .then((moments["time_start"] - moments["time_end"].shift(1)).dt.total_seconds())
+            .otherwise(None)
+        )
+        gap_game = pl.when(~game_boundary).then(moments["gse"] - moments["gse"].shift(1)).otherwise(None)
+        moments = moments.with_columns((gap_real - gap_game).alias("excess"))
+
+        # Filter: large excess, no logged timeout, not a period boundary
+        candidates = moments.filter(
+            (pl.col("excess") >= CDNNBADatasetPL._TV_TIMEOUT_MIN_EXCESS_SEC)
+            & (~pl.col("has_timeout"))
+            & (~pl.col("has_period"))
+            & (pl.col("excess").is_not_null())
+        )
+
+        if candidates.height == 0:
+            return pl.DataFrame(schema=df.schema)
+
+        # Build new rows matching df's schema.
+        # orderNumber: place just before the moment (order_before - 1)
+        new_rows = pl.DataFrame(
+            {
+                "gameId": candidates["gameId"],
+                "game_date": candidates["game_date"],
+                "period": candidates["period"],
+                "game_seconds_elapsed": candidates["gse"],
+                "seconds_remaining": candidates["seconds_remaining"],
+                "seconds_elapsed": candidates["seconds_elapsed"],
+                "orderNumber": candidates["order_before"] - 1,
+                "actionType": pl.Series(["timeout"] * candidates.height, dtype=pl.String),
+                "subType": pl.Series(["official_inferred"] * candidates.height, dtype=pl.String),
+                "description": pl.Series(["Inferred TV/Official Timeout"] * candidates.height, dtype=pl.String),
+                "scoreHome": candidates["scoreHome"],
+                "scoreAway": candidates["scoreAway"],
+                "possession": candidates["possession"],
+                "IsPlayoff": candidates["IsPlayoff"],
+                "periodType": candidates["periodType"],
+                "season": candidates["season"],
+                "season_type": candidates["season_type"],
+                "personId": pl.Series([0] * candidates.height, dtype=pl.Int64),
+                "points_scored": pl.Series([0] * candidates.height, dtype=pl.Int64),
+                "score_margin": candidates["score_margin"],
+                "is_clutch": candidates["is_clutch"],
+                "possession_id": candidates["possession_id"],
+            }
+        )
+
+        # Fill remaining columns with nulls to match schema
+        for col_name, col_dtype in df.schema.items():
+            if col_name not in new_rows.columns:
+                new_rows = new_rows.with_columns(pl.lit(None).cast(col_dtype).alias(col_name))
+
+        # Reorder to match original schema
+        return new_rows.select(df.columns)
+
+    @staticmethod
+    def _inject_tv_timeouts(df: pl.DataFrame) -> pl.DataFrame:
+        """Infer TV timeouts and insert them into the DataFrame, maintaining sort order."""
+        new_rows = CDNNBADatasetPL._infer_tv_timeouts(df)
+        if new_rows.height == 0:
+            return df
+
+        # Cast categorical columns in new_rows to match df
+        for col_name in df.columns:
+            if df.schema[col_name] == pl.Categorical and new_rows.schema[col_name] != pl.Categorical:
+                new_rows = new_rows.with_columns(pl.col(col_name).cast(pl.Categorical))
+
+        combined = pl.concat([df, new_rows], how="diagonal_relaxed")
+        combined = combined.sort("game_date", "gameId", "orderNumber")
+
+        n_new = new_rows.height
+        n_games = new_rows["gameId"].n_unique()
+        print(
+            f"  Injected {n_new:,} inferred TV timeouts across {n_games:,} games "
+            f"({n_new / max(n_games, 1):.1f}/game)"
+        )
+        return combined
 
     _VALID_OUTCOMES = {
         "made_2pt",

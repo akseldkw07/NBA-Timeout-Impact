@@ -7,8 +7,10 @@ Usage:
     memo = CDNNBAMemoPL.load_all()
 """
 
+import typing as t
+
 import polars as pl
-from kret_polars.memo_df_pl import InputTypedDictPL, MemoDataFramePL, memo_series
+from kret_polars.memo_df_pl import InputTypedDictPL, MemoDataFramePL, memo_fn, memo_series
 
 from .enriched_boxscores import BoxscoresDatasetPL
 from .enriched_cdnnba import CDNNBADatasetPL
@@ -70,6 +72,244 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
                 "stints": StintsDatasetPL.load_from_parquet(),
             }
         )
+
+    # ------------------------------------------------------------------ #
+    #  Core memo series                                                    #
+    # ------------------------------------------------------------------ #
+
+    @memo_series
+    def f_clock_reversal(self) -> pl.Series:
+        """Boolean mask: True for rows where game_seconds_elapsed decreases
+        relative to the previous row within the same game.
+
+        These are caused by:
+        - ``instantreplay`` requests logged with a slightly stale clock
+        - ``memo`` events (stat corrections / annotations) carrying the
+          clock of the original play they reference
+
+        Both are non-play metadata — safe to exclude from time-based analysis.
+        """
+        df = self.cdnnba
+        game_boundary = df["gameId"] != df["gameId"].shift(1)
+        gse_diff = df["game_seconds_elapsed"].diff()
+        return ((gse_diff < 0) & ~game_boundary).fill_null(False)
+
+    # ------------------------------------------------------------------ #
+    #  Ported from NBAMemoDF (pandas) — timeouts, lead, streaks, ptrs     #
+    # ------------------------------------------------------------------ #
+
+    @memo_fn
+    def ptr_n_mins(self, n: float) -> pl.Series:
+        """For every event, return the row index of the closest event
+        ``n`` minutes ahead (n > 0) or behind (n < 0) within the same game.
+
+        Returns null where no match exists.
+        """
+        window = n * 60.0
+        df = self.cdnnba
+        lookup = (
+            pl.DataFrame({"gameId": df["gameId"], "gse": df["game_seconds_elapsed"]}).with_row_index("ptr").sort("gse")
+        )
+        queries = lookup.with_columns((pl.col("gse") + window).alias("target_time")).sort("target_time")
+        merged = queries.join_asof(
+            lookup.rename({"gse": "gse_r", "ptr": "ptr_r"}),
+            left_on="target_time",
+            right_on="gse_r",
+            by="gameId",
+            strategy="nearest",
+        )
+        return merged.sort("ptr")["ptr_r"]
+
+    # -- timeouts --
+
+    @memo_series
+    def f_timeout(self) -> pl.Series:
+        return self.cdnnba["actionType"] == "timeout"
+
+    @memo_series
+    def f_timeout_endogenous(self) -> pl.Series:
+        """Coach-called timeouts (full or challenge)."""
+        df = self.cdnnba
+        return (df["actionType"] == "timeout") & df["subType"].is_in(["full", "challenge"])
+
+    @memo_series
+    def f_timeout_exogenous(self) -> pl.Series:
+        """Inferred TV/official timeouts (injected during load)."""
+        df = self.cdnnba
+        return (df["actionType"] == "timeout") & (df["subType"] == "official_inferred")
+
+    @memo_series
+    def f_stoppage(self) -> pl.Series:
+        return self.cdnnba["actionType"] == "stoppage"
+
+    @memo_fn
+    def f_stoppage_subtype(self, subtype: str) -> pl.Series:
+        """Filter for a specific stoppage subType (e.g. 'out-of-bounds', 'injury', 'blood rule')."""
+        df = self.cdnnba
+        return (df["actionType"] == "stoppage") & (df["subType"] == subtype)
+
+    # -- lead & lead change --
+
+    @memo_series
+    def lead(self) -> pl.Series:
+        return self.cdnnba["scoreHome"] - self.cdnnba["scoreAway"]
+
+    @memo_fn
+    def lead_change_n_mins(self, n: float) -> pl.Series:
+        """Positive = home lead increased after n minutes; negative = decreased."""
+        future_lead = self.lead.gather(self.ptr_n_mins(n).cast(pl.UInt32).fill_null(0))
+        valid = self.ptr_n_mins(n).is_not_null()
+        return (future_lead - self.lead).set(~valid, None)
+
+    @memo_fn
+    def score_diff_n_mins(self, n: float) -> pl.Series:
+        """Alias for lead_change_n_mins."""
+        return self.lead_change_n_mins(n)
+
+    # -- streaks --
+
+    @memo_series
+    def streak(self) -> pl.Series:
+        """Running scoring streak. Positive = home run, negative = away run.
+
+        Resets at game boundaries and when the scoring team changes.
+        """
+        df = self.cdnnba
+        game_boundary = df["gameId"] != df["gameId"].shift(1)
+
+        home_pts = df["scoreHome"].diff().clip(0, None).fill_null(0).set(game_boundary, 0)
+        away_pts = df["scoreAway"].diff().clip(0, None).fill_null(0).set(game_boundary, 0)
+        net = home_pts - away_pts
+
+        # Forward-fill the sign of the last scoring event (home=1, away=-1)
+        scorer = net.sign().set(net == 0, None).forward_fill().fill_null(0)
+
+        # New segment when: game starts OR scoring team changes
+        new_segment = game_boundary | ((net != 0) & (scorer != scorer.shift(1).fill_null(0)))
+        segment = new_segment.cum_sum()
+
+        # Cumulative sum of net within each segment
+        return pl.DataFrame({"net": net, "segment": segment}).with_columns(
+            pl.col("net").cum_sum().over("segment").alias("streak")
+        )["streak"]
+
+    @memo_fn
+    def f_streak_n(self, n: int, direction: t.Literal["home", "away", "either"] = "either") -> pl.Series:
+        if direction == "home":
+            return self.streak >= n
+        elif direction == "away":
+            return self.streak <= -n
+        elif direction == "either":
+            return self.streak.abs() >= n
+        else:
+            raise ValueError(f"Invalid direction: {direction}")
+
+    # ------------------------------------------------------------------ #
+    #  Possession-level table and post-timeout analysis                    #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def possessions(self) -> pl.DataFrame:
+        """One row per possession with aggregated stats.
+
+        Columns: gameId, possession_id, period, possession_points,
+        possession_outcome, poss_start_gse, seconds_remaining,
+        score_margin, streak, season, season_type, IsPlayoff,
+        possession (teamId of possessing team).
+
+        Cached in ``_df_dict`` on first access.
+        """
+        key = "_possessions"
+        if key not in self._df_dict:
+            print("Computing possessions table...")
+            df = pl.DataFrame._from_pydf(self.cdnnba._df)
+            streak_s = self.streak
+
+            poss = (
+                df.with_columns(streak_s.alias("_streak"))
+                .filter(pl.col("possession_id").is_not_null())
+                .group_by("gameId", "possession_id", maintain_order=True)
+                .agg(
+                    pl.col("period").first(),
+                    pl.col("possession_points").last(),
+                    pl.col("possession_outcome").last(),
+                    pl.col("game_seconds_elapsed").first().alias("poss_start_gse"),
+                    pl.col("seconds_remaining").first(),
+                    pl.col("score_margin").first(),
+                    pl.col("_streak").first().alias("streak"),
+                    pl.col("season").first(),
+                    pl.col("season_type").first(),
+                    pl.col("IsPlayoff").first(),
+                    pl.col("possession").first(),
+                )
+            )
+            print(f"  {poss.height:,} possessions")
+            self._df_dict[key] = poss
+        return self._df_dict[key]
+
+    @property
+    def post_timeout_possessions(self) -> pl.DataFrame:
+        """For each timeout row, join the next N possessions (up to 5) in the same game.
+
+        Returns a table with one row per (timeout, offset) pair:
+            all timeout-row context columns + offset (1-5) + possession_points + possession_outcome
+
+        Cached in ``_df_dict`` on first access.
+        """
+        key = "_post_timeout_possessions"
+        if key not in self._df_dict:
+            print("Computing post_timeout_possessions...")
+            df = pl.DataFrame._from_pydf(self.cdnnba._df)
+
+            # Timeout rows with their context
+            # teamId = team that called the timeout (null for official_inferred)
+            timeouts = df.filter(pl.col("actionType") == "timeout").select(
+                "gameId",
+                "possession_id",
+                "period",
+                "game_seconds_elapsed",
+                "seconds_remaining",
+                "score_margin",
+                "season",
+                "season_type",
+                "IsPlayoff",
+                pl.col("subType").alias("timeout_subtype"),
+                pl.col("teamId").alias("timeout_team"),
+            )
+
+            poss = self.possessions
+            max_offset = 5
+            frames = []
+            for offset in range(1, max_offset + 1):
+                joined = (
+                    timeouts.with_columns((pl.col("possession_id") + offset).alias("_target_poss_id"))
+                    .join(
+                        poss.select(
+                            "gameId",
+                            "possession_id",
+                            "possession_points",
+                            "possession_outcome",
+                            pl.col("possession").alias("poss_team"),
+                        ),
+                        left_on=["gameId", "_target_poss_id"],
+                        right_on=["gameId", "possession_id"],
+                        how="left",
+                    )
+                    .with_columns(
+                        pl.lit(offset).alias("offset").cast(pl.Int32),
+                        # Whether this possession belongs to the team that called the timeout
+                        (pl.col("timeout_team") == pl.col("poss_team")).alias("is_calling_team_poss"),
+                    )
+                    .drop("_target_poss_id")
+                )
+                frames.append(joined)
+
+            result = pl.concat(frames)
+            # Drop rows where the possession doesn't exist (end of game)
+            result = result.filter(pl.col("possession_points").is_not_null())
+            print(f"  {result.height:,} (timeout, offset) pairs")
+            self._df_dict[key] = result
+        return self._df_dict[key]
 
     # ------------------------------------------------------------------ #
     #  Pointer memo series — row indices into supplemental datasets        #
@@ -182,24 +422,3 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
             .alias("_ptr")
         )
         return joined.sort("_spine_idx")["_ptr"]
-
-    # ------------------------------------------------------------------ #
-    #  Core memo series                                                    #
-    # ------------------------------------------------------------------ #
-
-    @memo_series
-    def f_clock_reversal(self) -> pl.Series:
-        """Boolean mask: True for rows where game_seconds_elapsed decreases
-        relative to the previous row within the same game.
-
-        These are caused by:
-        - ``instantreplay`` requests logged with a slightly stale clock
-        - ``memo`` events (stat corrections / annotations) carrying the
-          clock of the original play they reference
-
-        Both are non-play metadata — safe to exclude from time-based analysis.
-        """
-        df = self.cdnnba
-        game_boundary = df["gameId"] != df["gameId"].shift(1)
-        gse_diff = df["game_seconds_elapsed"].diff()
-        return ((gse_diff < 0) & ~game_boundary).fill_null(False)

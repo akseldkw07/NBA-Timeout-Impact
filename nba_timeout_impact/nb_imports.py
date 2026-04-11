@@ -1,4 +1,6 @@
 from nba_timeout_impact.constants import NBAConstants
+
+# THESE ARE SLOW
 from nba_timeout_impact.data_pipes.cdnnba_pipeline import CDNNBAPipelineHelper
 from nba_timeout_impact.data_pipes.clean_pipeline_nbastatsv3 import NBAStatsV3CleanPipeline
 from nba_timeout_impact.data_pipes.load_data_utils import NBADataLoader
