@@ -127,13 +127,37 @@ class CDNNBADatasetPL(Enriched_DF_PL):
     # ------------------------------------------------------------------ #
     #
     # cdnnba only logs coach-called timeouts ("full", "challenge").
-    # NBA rules mandate ~2 TV timeouts per quarter at first dead ball
-    # under 6:59 and 2:59 remaining.  We detect these by finding moments
-    # where real-world time (timeActual) advances >> game clock, with no
-    # logged timeout.  Injected rows have actionType="timeout",
-    # subType="official_inferred".
+    # NBA rules mandate TV timeouts at specific game-clock marks in each
+    # applicable period.  We provide two inference methods:
+    #
+    # 1. Heuristic (original): find large real-time gaps in timeActual
+    #    with no logged timeout. Requires wall-clock timestamps.
+    # 2. Rulebook: walk through period events and inject a mandatory
+    #    timeout at the first dead ball past each rulebook threshold,
+    #    skipping if a coach TO already occurred in that window.
+    #    Validated against 2013-2016 nbastatsv3 ground truth with
+    #    Rule v7: thresholds [540, 360, 180] in Q2/Q4 → F1 ~0.88-0.92.
+    #
+    # Injected rows have actionType="timeout", subType="official_inferred".
 
     _TV_TIMEOUT_MIN_EXCESS_SEC = 90.0
+
+    # Rulebook params tuned for the cdnnba era (post-2017 NBA rules).
+    # Applied to ALL four quarters with 2 mandatory marks: 7:00 and 3:00 remaining.
+    _RULEBOOK_THRESHOLDS_POST2017 = [420, 180]
+    _RULEBOOK_PERIODS_POST2017 = [1, 2, 3, 4]
+    _CDNNBA_COACH_TO_SUBTYPES = ["full", "challenge"]
+    _CDNNBA_DEAD_BALL_ACTION_TYPES = {
+        "foul",
+        "freethrow",
+        "substitution",
+        "turnover",
+        "violation",
+        "jumpball",
+        "stoppage",
+        "timeout",
+        "ejection",
+    }
 
     @staticmethod
     def _infer_tv_timeouts(df: pl.DataFrame) -> pl.DataFrame:
@@ -265,8 +289,17 @@ class CDNNBADatasetPL(Enriched_DF_PL):
 
     @staticmethod
     def _inject_tv_timeouts(df: pl.DataFrame) -> pl.DataFrame:
-        """Infer TV timeouts and insert them into the DataFrame, maintaining sort order."""
-        new_rows = CDNNBADatasetPL._infer_tv_timeouts(df)
+        """Infer TV timeouts and insert them into the DataFrame, maintaining sort order.
+
+        Uses the rulebook-based method by default. Set
+        ``CDNNBADatasetPL._USE_RULEBOOK_INJECTION = False`` to fall back
+        to the real-time excess heuristic.
+        """
+        if CDNNBADatasetPL._USE_RULEBOOK_INJECTION:
+            new_rows = CDNNBADatasetPL._infer_tv_timeouts_rulebook(df)
+        else:
+            new_rows = CDNNBADatasetPL._infer_tv_timeouts(df)
+
         if new_rows.height == 0:
             return df
 
@@ -280,11 +313,223 @@ class CDNNBADatasetPL(Enriched_DF_PL):
 
         n_new = new_rows.height
         n_games = new_rows["gameId"].n_unique()
+        method = "rulebook" if CDNNBADatasetPL._USE_RULEBOOK_INJECTION else "heuristic"
         print(
-            f"  Injected {n_new:,} inferred TV timeouts across {n_games:,} games "
+            f"  Injected {n_new:,} inferred TV timeouts ({method}) across {n_games:,} games "
             f"({n_new / max(n_games, 1):.1f}/game)"
         )
         return combined
+
+    _USE_RULEBOOK_INJECTION = True  # set False for real-time excess heuristic
+
+    @staticmethod
+    def _infer_tv_timeouts_rulebook(df: pl.DataFrame) -> pl.DataFrame:
+        """Rulebook-based TV timeout detection for cdnnba.
+
+        Runs the generic ``infer_tv_timeouts_rulebook`` with post-2017
+        thresholds and cdnnba-specific action/subType conventions, then
+        builds full injection rows by joining context columns from the
+        triggering event.
+        """
+        hits = CDNNBADatasetPL.infer_tv_timeouts_rulebook(
+            df,
+            thresholds=CDNNBADatasetPL._RULEBOOK_THRESHOLDS_POST2017,
+            periods=CDNNBADatasetPL._RULEBOOK_PERIODS_POST2017,
+            coach_to_subtypes=CDNNBADatasetPL._CDNNBA_COACH_TO_SUBTYPES,
+            dead_ball_action_types=CDNNBADatasetPL._CDNNBA_DEAD_BALL_ACTION_TYPES,
+            order_col="orderNumber",
+        )
+        if hits.height == 0:
+            return pl.DataFrame(schema=df.schema)
+
+        # Look up the full row context at the triggering event via join.
+        # `order_before` is the orderNumber of the dead-ball event that
+        # triggered the mandatory. We place the injected row just before
+        # it by subtracting 1 from orderNumber (same convention as the
+        # heuristic method).
+        context_cols = [
+            "game_date",
+            "game_seconds_elapsed",
+            "seconds_elapsed",
+            "scoreHome",
+            "scoreAway",
+            "possession",
+            "IsPlayoff",
+            "periodType",
+            "season",
+            "season_type",
+            "score_margin",
+            "is_clutch",
+            "possession_id",
+        ]
+        context = df.select(
+            "gameId",
+            pl.col("orderNumber").alias("order_before"),
+            *[c for c in context_cols if c in df.columns],
+        )
+        joined = hits.join(context, on=["gameId", "order_before"], how="left")
+
+        new_rows = pl.DataFrame(
+            {
+                "gameId": joined["gameId"],
+                "game_date": joined["game_date"],
+                "period": joined["period"],
+                "game_seconds_elapsed": joined["game_seconds_elapsed"],
+                "seconds_remaining": joined["seconds_remaining"],
+                "seconds_elapsed": joined["seconds_elapsed"],
+                "orderNumber": joined["order_before"] - 1,
+                "actionType": pl.Series(["timeout"] * joined.height, dtype=pl.String),
+                "subType": pl.Series(["official_inferred"] * joined.height, dtype=pl.String),
+                "description": pl.Series(["Inferred TV/Official Timeout"] * joined.height, dtype=pl.String),
+                "scoreHome": joined["scoreHome"],
+                "scoreAway": joined["scoreAway"],
+                "possession": joined["possession"],
+                "IsPlayoff": joined["IsPlayoff"],
+                "periodType": joined["periodType"],
+                "season": joined["season"],
+                "season_type": joined["season_type"],
+                "personId": pl.Series([0] * joined.height, dtype=pl.Int64),
+                "points_scored": pl.Series([0] * joined.height, dtype=pl.Int64),
+                "score_margin": joined["score_margin"],
+                "is_clutch": joined["is_clutch"],
+                "possession_id": joined["possession_id"],
+            }
+        )
+
+        for col_name, col_dtype in df.schema.items():
+            if col_name not in new_rows.columns:
+                new_rows = new_rows.with_columns(pl.lit(None).cast(col_dtype).alias(col_name))
+
+        return new_rows.select(df.columns)
+
+    @staticmethod
+    def infer_tv_timeouts_rulebook(
+        df: pl.DataFrame,
+        thresholds: list[int],
+        periods: list[int],
+        coach_to_subtypes: list[str],
+        dead_ball_action_types: set[str],
+        action_type_col: str = "actionType",
+        sub_type_col: str = "subType",
+        gameId_col: str = "gameId",
+        period_col: str = "period",
+        sr_col: str = "seconds_remaining",
+        order_col: str = "orderNumber",
+    ) -> pl.DataFrame:
+        """Rulebook-based inference of mandatory TV timeouts.
+
+        For each (game, period in ``periods``), walk thresholds in order.
+        For each threshold T:
+          - If any coach TO fired in the window (T, prev_T], mark slot absorbed
+            and advance to next threshold.
+          - Else fire a mandatory timeout at the first dead ball with
+            seconds_remaining <= T (excluding coach TOs themselves).
+          - Only the FIRST unabsorbed slot produces a mandatory.
+
+        Parameters
+        ----------
+        df : pl.DataFrame
+            Play-by-play data. Must contain columns named by
+            ``action_type_col``, ``sub_type_col``, ``gameId_col``,
+            ``period_col``, ``sr_col``, ``order_col``.
+        thresholds : list[int]
+            Ordered list of seconds-remaining thresholds to check, e.g.
+            [540, 360, 180] for the pre-2017 9:00/6:00/3:00 marks.
+        periods : list[int]
+            Periods in which the rule applies, e.g. [2, 4] for pre-2017.
+        coach_to_subtypes : list[str]
+            subType values that indicate a coach timeout (e.g. ["Regular",
+            "Short", "Coach Challenge"] for nbastatsv3 or ["full", "challenge"]
+            for cdnnba).
+        dead_ball_action_types : set[str]
+            actionType values considered dead-ball events.
+
+        Returns
+        -------
+        pl.DataFrame with columns: gameId, period, seconds_remaining,
+        order_before (the orderNumber of the triggering event).
+        One row per inferred mandatory timeout.
+        """
+        # Vectorized implementation. For each (gameId, period):
+        #  - per threshold k with absorption window (t_k, prev_t_k]:
+        #      absorbed_k = any coach TO in that window
+        #      fire_order_k, fire_sr_k = first (smallest order_col) non-coach
+        #          dead-ball event with sr <= t_k
+        #  - the mandatory fires at the FIRST unabsorbed slot that has a fire
+        #    candidate. "Unabsorbed" = the slot wasn't skipped due to a coach
+        #    TO in its absorption window.
+        #
+        # Equivalent to the prior Python loop but computed with one group_by.
+
+        is_coach_timeout_expr = pl.col(action_type_col).is_in(["timeout", "Timeout"]) & pl.col(sub_type_col).cast(
+            pl.String
+        ).is_in(coach_to_subtypes)
+        is_dead_ball_expr = pl.col(action_type_col).is_in(list(dead_ball_action_types))
+        is_non_coach_dead_ball_expr = is_dead_ball_expr & ~is_coach_timeout_expr
+
+        working = (
+            df.filter(pl.col(period_col).is_in(periods))
+            .select(gameId_col, period_col, sr_col, order_col, action_type_col, sub_type_col)
+            .sort(gameId_col, period_col, order_col)
+        )
+
+        if working.height == 0:
+            schema = {
+                gameId_col: pl.Int64,
+                period_col: pl.Int64,
+                sr_col: pl.Float64,
+                "order_before": pl.Int64,
+            }
+            return pl.DataFrame(schema=schema)
+
+        # Build aggregation expressions: 3 per threshold.
+        agg_exprs: list[pl.Expr] = []
+        prev_ts = [720] + thresholds[:-1]
+        for prev_t, t in zip(prev_ts, thresholds):
+            # Absorbed = any coach TO with sr in (t, prev_t]
+            absorbed_expr = (
+                (is_coach_timeout_expr & (pl.col(sr_col) <= prev_t) & (pl.col(sr_col) > t)).any().alias(f"absorbed_{t}")
+            )
+            # First non-coach dead ball with sr <= t (smallest order)
+            fire_mask = is_non_coach_dead_ball_expr & (pl.col(sr_col) <= t)
+            fire_order_expr = pl.col(order_col).filter(fire_mask).first().alias(f"fire_order_{t}")
+            fire_sr_expr = pl.col(sr_col).filter(fire_mask).first().alias(f"fire_sr_{t}")
+            agg_exprs.extend([absorbed_expr, fire_order_expr, fire_sr_expr])
+
+        grouped = working.group_by([gameId_col, period_col], maintain_order=True).agg(*agg_exprs)
+
+        # Determine which slot actually fires.
+        # Slot k fires iff for all j < k the slot was either absorbed OR had no
+        # fire candidate, AND slot k is not absorbed and has a fire candidate.
+        # Build a chain of when/then (no .otherwise() until the end so we can
+        # keep appending branches — otherwise() returns a plain Expr).
+        fire_order_chain = None  # polars Then object
+        fire_sr_chain = None
+        prior_invalid_expr = pl.lit(True)  # all prior slots were invalid (no fire)
+        for t in thresholds:
+            absorbed = pl.col(f"absorbed_{t}")
+            fo = pl.col(f"fire_order_{t}")
+            fsr = pl.col(f"fire_sr_{t}")
+            slot_fires = prior_invalid_expr & ~absorbed & fo.is_not_null()
+            if fire_order_chain is None:
+                fire_order_chain = pl.when(slot_fires).then(fo)
+                fire_sr_chain = pl.when(slot_fires).then(fsr)
+            else:
+                fire_order_chain = fire_order_chain.when(slot_fires).then(fo)
+                fire_sr_chain = fire_sr_chain.when(slot_fires).then(fsr)  # type: ignore[assignment]
+            # Slot was invalid iff absorbed OR no fire candidate
+            prior_invalid_expr = prior_invalid_expr & (absorbed | fo.is_null())
+
+        assert fire_order_chain is not None and fire_sr_chain is not None
+        fire_order_expr = fire_order_chain.otherwise(None).alias("order_before")
+        fire_sr_expr = fire_sr_chain.otherwise(None).alias(sr_col)
+
+        result = (
+            grouped.with_columns(fire_order_expr, fire_sr_expr)
+            .filter(pl.col("order_before").is_not_null())
+            .select(gameId_col, period_col, sr_col, "order_before")
+        )
+        return result
 
     _VALID_OUTCOMES = {
         "made_2pt",
