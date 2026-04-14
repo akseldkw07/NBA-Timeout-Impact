@@ -23,3 +23,13 @@
 ### Data analysis
 
 Run a comprehensive study of the timeout impact (similar to what's done in `plot_stoppage_run_impact`) but conditioning on as many variables as possible. Use your judgement to determine which variables are most important to condition on, and report on the results. This will be a long process, and will require you to write a lot of code, but it will be worth it in the end. The goal is to understand how timeouts impact the game, and to identify any patterns or trends that might be present. Log the results in a clear and concise manner, and be sure to include any relevant visualizations or charts to help illustrate your findings.
+
+Variables:
+- Timeout type (TV, official, coach challenge)
+- Game situation (score margin, time remaining, quarter, player fatigue)
+- Current team momentum (recent scoring runs, player performance)
+- Team characteristics (offensive/defensive ratings, season record, average player age)
+- Head-to-head stats (score margin, points per possession, points per minute) - figure out what the "mean" we're comparing against is for these stats, and condition on that
+- home vs away
+- Regular season vs playoffs
+- timeout substitutions
