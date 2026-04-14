@@ -31,42 +31,40 @@
 % Heading arguments are {volume}{year}{pages}{date submitted}{date published}{paper id}{author-full-names}
 
 \usepackage{lastpage}
-\jmlrheading{23}{2022}{1-\pageref{LastPage}}{1/21; Revised 5/22}{9/22}{21-0000}{Author One and Author Two}
+\jmlrheading{26}{2026}{1-\pageref{LastPage}}{4/26; Revised 5/26}{9/26}{21-0000}{Aksel Kretsinger-Walters}
 
 % Short headings should be running head and authors last names
 
-\ShortHeadings{Sample JMLR Paper}{One and Two}
+\ShortHeadings{A Causal Evaluation of Timeouts in the NBA}{Aksel Kretsinger-Walters}
 \firstpageno{1}
 
 \begin{document}
 
-\title{Sample JMLR Paper}
+\title{A Causal Evaluation of Timeouts in the NBA}
 
-\author{\name Author One \email one@stat.washington.edu \\
-		\addr Department of Statistics\\
-		University of Washington\\
-		Seattle, WA 98195-4322, USA
-		\AND
-		\name Author Two \email two@cs.berkeley.edu \\
-		\addr Division of Computer Science\\
-		University of California\\
-Berkeley, CA 94720-1776, USA}
+\author{\name Aksel Kretsinger-Walters \email adk2164@columbia.edu \\
+		\addr Department of Computer Science\\
+		Columbia University\\
+New York, NY 10027, USA}
 
-\editor{My editor}
+\editor{David M. Blei}
 
 \maketitle
 
 \begin{abstract}%   <- trailing '%' for backward compatibility of .sty file
-		\blindtext
+		There is a long-standing belief in the NBA that calling a timeout during an opponent's scoring run can
+		disrupt their momentum and improve the calling team's chances of winning. However, the empirical evidence
+		in support of this belief is limited and inconclusive. In this paper, we use play-by-play data from the
+		2021-2026 NBA seasons to conduct a causal analysis of the effect of timeouts on team performance.
 \end{abstract}
 
 \begin{keywords}
-  keyword one, keyword two, keyword three
+		Causal inference, sports analytics, NBA, timeouts, momentum, difference-in-differences, synthetic control
 \end{keywords}
 
 \section{Introduction}
 
-\blindmathpaper
+% \blindmathpaper
 
 Here is a citation \cite{chow:68}.
 
