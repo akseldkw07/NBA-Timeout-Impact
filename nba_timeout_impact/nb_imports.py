@@ -1,8 +1,15 @@
 from nba_timeout_impact.constants import NBAConstants
+
+# THESE ARE SLOW
 from nba_timeout_impact.data_pipes.cdnnba_pipeline import CDNNBAPipelineHelper
 from nba_timeout_impact.data_pipes.clean_pipeline_nbastatsv3 import NBAStatsV3CleanPipeline
 from nba_timeout_impact.data_pipes.load_data_utils import NBADataLoader
-from nba_timeout_impact.memo_cdnnba import CDNNBADataset, CDNNBADatasetInput_TypedDict, CDNNBAMemoDF
-from nba_timeout_impact.memo_cdnnba_pl import CDNNBADatasetInputPL, CDNNBADatasetPL, CDNNBAMemoDFPL
-from nba_timeout_impact.memo_nbastatsv3 import NBADataset, NBADatasetInput_TypedDict, NBAMemoDF
+from nba_timeout_impact.datasets.enriched_boxscores import BoxscoresDatasetPL
+from nba_timeout_impact.datasets.enriched_player_advanced_stats import PlayerAdvancedStatsDatasetPL
+from nba_timeout_impact.datasets.enriched_player_season_stats import PlayerSeasonStatsDatasetPL
+from nba_timeout_impact.datasets.enriched_rotations import RotationsDatasetPL
+from nba_timeout_impact.datasets.enriched_stints import StintsDatasetPL
+from nba_timeout_impact.datasets.memo_cdnnba import CDNNBADataset, CDNNBADatasetInput_TypedDict, CDNNBAMemoDF
+from nba_timeout_impact.datasets.memo_cdnnba_pl import CDNNBADatasetInputPL, CDNNBADatasetPL, CDNNBAMemoPL
+from nba_timeout_impact.datasets.memo_nbastatsv3 import NBADataset, NBADatasetInput_TypedDict, NBAMemoDF
 from nba_timeout_impact.nba_plotting_utils import NBAPlottingUtils
