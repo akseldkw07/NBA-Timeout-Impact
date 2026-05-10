@@ -1,0 +1,297 @@
+\documentclass[twoside,11pt]{article}
+
+\usepackage{blindtext}
+\usepackage{amsmath}
+
+% Any additional packages needed should be included after jmlr2e.
+% Note that jmlr2e.sty includes epsfig, amssymb, natbib and graphicx,
+% and defines many common macros, such as 'proof' and 'example'.
+%
+% It also sets the bibliographystyle to plainnat; for more information on
+% natbib citation styles, see the natbib documentation, a copy of which
+% is archived at http://www.jmlr.org/format/natbib.pdf
+
+% Available options for package jmlr2e are:
+%
+%   - abbrvbib : use abbrvnat for the bibliography style
+%   - nohyperref : do not load the hyperref package
+%   - preprint : remove JMLR specific information from the template,
+%         useful for example for posting to preprint servers.
+%
+% Example of using the package with custom options:
+%
+% \usepackage[abbrvbib, preprint]{jmlr2e}
+
+\usepackage{jmlr2e}
+\hypersetup{colorlinks=true, urlcolor=blue, citecolor=blue, linkcolor=blue}
+
+% Definitions of handy macros can go here
+
+\newcommand{\dataset}{{\cal D}}
+\newcommand{\fracpartial}[2]{\frac{\partial #1}{\partial  #2}}
+
+% Heading arguments are {volume}{year}{pages}{date submitted}{date published}{paper id}{author-full-names}
+
+\usepackage{lastpage}
+\jmlrheading{26}{2026}{1-\pageref{LastPage}}{4/26; Revised 5/26}{9/26}{21-0000}{Aksel Kretsinger-Walters}
+
+% Short headings should be running head and authors last names
+
+\ShortHeadings{A Causal Evaluation of Timeouts in the NBA}{Aksel Kretsinger-Walters}
+\firstpageno{1}
+
+\begin{document}
+
+\title{A Causal Evaluation of Timeouts in the NBA}
+
+\author{\name Aksel Kretsinger-Walters \email adk2164@columbia.edu \\
+		\addr Department of Computer Science\\
+		Columbia University\\
+New York, NY 10027, USA}
+
+\editor{David M. Blei}
+
+\maketitle
+
+\begin{abstract}%   <- trailing '%' for backward compatibility of .sty file
+		There is a long-standing belief in the NBA that calling a timeout during an opponent's scoring run can
+		disrupt their momentum and improve the calling team's chances of winning. However, the empirical evidence
+		in support of this belief is limited and inconclusive. In this paper, we use play-by-play data from the
+		2021-2026 NBA seasons to conduct a causal analysis of the effect of timeouts on team performance.
+\end{abstract}
+
+\begin{keywords}
+		Causal inference, sports analytics, NBA, timeouts, momentum, difference-in-differences, synthetic control
+\end{keywords}
+
+% \section{Introduction}
+
+\section{Related Works}
+
+The question of whether timeouts actually disrupt momentum has been studied from several angles, with notably
+conflicting conclusions. \citet{assis2020stop} apply a formal causal framework to NBA play-by-play data,
+using matching techniques informed by a causal graph to estimate the counterfactual effect of a timeout. They
+conclude that timeouts have \emph{no} effect on team performance, and argue that the apparent rebound
+observed after a timeout is simply regression to the mean: because timeouts tend to be called when the
+opposing team is scoring at an unusually high rate, any subsequent slowdown reflects the natural tendency of
+scoring to return to its average rather than a causal effect of the stoppage itself.
+
+\citet{gibbs2021causal} revisit the same question but restrict attention to the specific scenario of an
+opposing team's scoring run, where the strategic stakes of the timeout decision are highest. Working within
+the Rubin causal model, they carefully define units under SUTVA and introduce an interpretable outcome based
+on the score difference to capture broad changes in scoring dynamics. In contrast to \citet{assis2020stop},
+they find that calling a timeout during an opposing run is \emph{slightly disadvantageous} on average, and
+further show that the magnitude of this effect varies meaningfully by franchise. Their result suggests that
+comebacks after runs happen frequently enough to create the illusion of timeout efficacy, but that the
+intervention itself does not help.
+
+\citet{weimer2023causal} take a different identification strategy by exploiting mandatory television
+timeouts, which are triggered at predetermined points in the game and are therefore plausibly exogenous with
+respect to in-game momentum. Using TV timeouts as a natural experiment that mimics random assignment of a
+pause, they report an \emph{11.2\% decline} in the scoring rate of the team carrying momentum immediately
+after a TV timeout, and they show this effect is robust to run size, substitutions, and game context. This
+stands in sharp contrast to the null result of \citet{assis2020stop} and the mildly negative result of
+\citet{gibbs2021causal}: by removing coach selection bias entirely, \citet{weimer2023causal} argue that
+team-level momentum genuinely exists and that pauses in play do interrupt it.
+
+\citet{qiu2025interrupt} approach the problem from a sports-psychology perspective rather than a
+causal-inference one, analyzing 4{,}051 timeouts across 1{,}235 elite basketball games using linear mixed
+models to test pre- versus post-timeout momentum over short (48s), medium (96s), and long (144s) windows.
+They find that timeouts significantly \emph{increase} momentum for teams that are trailing or otherwise
+disadvantaged, while tending to \emph{decrease} momentum for teams that are already ahead, with contextual
+factors such as game period and opponent strength substantially moderating the effect. Unlike the three
+causal papers above, which target an average treatment effect, their results emphasize heterogeneity:
+timeouts are neither uniformly helpful nor uniformly useless, and their efficacy is highly conditional on
+game state. Together these four studies motivate our own analysis, which aims to reconcile the tension
+between the exogenous-timeout evidence for a real momentum effect and the selection-bias-corrected evidence against one.
+
+% Acknowledgements and Disclosure of Funding should go at the end, before appendices and references
+\section{Methods}
+
+\subsection{Data}
+
+We build our analysis on the cdnnba enriched play-by-play data for the 2020--2025 NBA seasons (regular
+season and playoffs), loaded via our own \texttt{CDNNBAMemoPL.load\_all()} pipeline. After cleaning, the
+spine contains 4{,}183{,}347 play-by-play rows spanning 7{,}457 unique games and 1{,}480{,}697 possessions,
+of which 83{,}662 are coach-called timeouts and 14{,}561 are inferred mandatory television timeouts.
+
+\subsection{Timeout classification}
+
+We partition stoppage events into three mutually exclusive groups. \textbf{Endogenous} timeouts are
+coach-initiated stoppages, identified by \texttt{actionType == timeout} and \texttt{subType} in
+\{\texttt{full}, \texttt{challenge}\}. These are endogenous in the causal sense because coaches decide when to
+call them in response to game state. \textbf{Exogenous} timeouts are the mandatory television timeouts
+specified by the NBA rulebook at roughly the 6:59 and 2:59 marks of each period. The cdnnba feed does not
+directly label TV timeouts, so we inject them using a rulebook-based inference procedure and assign them
+\texttt{subType == official\_inferred}. We validated this procedure against the explicitly labeled 2013--2016
+nbastatsv3 feed and obtained an F1 of $0.88$--$0.92$, indicating good but imperfect recovery of mandatory
+timeouts. \textbf{Control} events are dead-ball moments with no timeout occurring during an active scoring
+run; to avoid over-representing long runs, we subsample at most one control per run segment.
+
+\subsection{Run and recovery definitions}
+
+A \emph{scoring run} at play $t$ is defined as $|\texttt{streak}(t)| \geq s$, where $\texttt{streak}(t)$ is
+the cumulative net score swing within the current scoring segment, computed by resetting the counter whenever
+the scoring team flips. We refer to the team being outscored as the \emph{suffering team} and the team
+scoring as the \emph{running team}.
+
+Our primary outcome is the \emph{recovery} metric: the signed lead change from the suffering team's
+perspective over a forward window of $n$ minutes. If $\texttt{lead}(t)$ is the home-minus-away margin at play
+$t$, we define
+\[
+		\texttt{recovery}(t, n) = -\operatorname{sign}(\texttt{streak}(t)) \cdot \bigl(\texttt{lead}(t + n\text{
+		min}) - \texttt{lead}(t)\bigr),
+\]
+so that positive values mean the suffering team clawed points back during the window. As a secondary outcome
+we also report $\texttt{running\_team\_pts}$, the raw points scored by the running team over the forward
+window, which matches the dependent variable used by \citet{weimer2023causal}.
+
+\subsection{Between-group estimators}
+
+As a first pass we compute group means of \texttt{recovery} conditional on run size $s$ and forward window
+$n$, and report differences versus the control group using Welch's $t$-tests. We sweep $s \in \{4, 5, 6, 7,
+8, 10, 12, 15\}$ and $n \in \{0.5, 1, 1.5, 2, 3, 4, 5\}$ minutes, and also stratify by quarter, regular season
+vs.\ playoffs, and absolute score margin.
+
+\subsection{Within-game matched-twin causal design}
+
+The between-group estimator is vulnerable to game-level confounding: coaches call timeouts in systematically
+different games than the ones where control events are drawn, and mandatory TV timeouts likewise cluster in
+particular game types. To remove this bias we use a \emph{within-game matched-twin} design. For each treated
+event (endogenous or exogenous timeout during a run of size $\geq s$), we search for a control event \emph{in
+the same game} that also satisfies: the same period; the same sign of $\texttt{streak}$ (so the run is against
+the same team); $|\Delta\,\texttt{streak}| \leq 2$ (comparable run magnitude); $|\Delta\,\texttt{seconds\_remaining}|
+\leq 120$s (comparable clock position within period); and $|\Delta\,\texttt{suffering\_margin}| \leq 3$
+(comparable score state). When multiple candidate controls match, we pick the one minimizing a combined
+distance over those dimensions. The per-pair causal estimate is the difference in \texttt{recovery} between
+the treated event and its matched twin, and we aggregate across pairs with a paired $t$-test. This design
+holds team composition, pace, coaching, and game-level momentum approximately fixed by construction.
+
+\subsection{Moderator analyses}
+
+To probe heterogeneity we repeat the between-group and matched-twin analyses within slices defined by
+(i) timeout subtype (\texttt{coach\_full}, \texttt{coach\_challenge}, \texttt{official\_inferred},
+\texttt{stoppage}); (ii) game phase and clutch status (last five minutes of Q4 with margin $\leq 5$);
+(iii) season-long team quality gap, using each team's \texttt{NET\_RATING} from \texttt{player\_advanced\_stats};
+(iv) the number of substitutions within a $\pm 30$s game-clock window around the event, bucketed as
+$\{0,\, 1\text{--}2,\, 3{+}\}$; and (v) the running team's in-game cumulative points-per-possession (PPP) at
+the time of the event, as a proxy for short-term shooting rhythm.
+
+\section{Evaluation}
+
+\subsection{Between-group results}
+
+The simple between-group comparison essentially reproduces the weak-to-null effects reported in the prior
+literature. Across run sizes $s \in \{5,\dots,10\}$ and forward windows $n \in \{1,\dots,5\}$ minutes, the
+endogenous-vs-control gap in \texttt{recovery} is never statistically significant (all $|\Delta| < 0.1$ pts,
+$p > 0.05$ in 15 of 16 cells). Exogenous timeouts, by contrast, look significantly \emph{negative}, with
+$\Delta \approx -0.25$ to $-0.45$ pts at the 3-minute window depending on run size ($p < 0.001$). Sweeping
+the forward window at fixed run size $s = 6$ shows the exogenous penalty growing from $-0.20$ at 30 seconds
+to a plateau around $-0.27$ at 3 minutes, while the endogenous gap hovers near zero throughout. At face value
+this matches the ``timeouts don't help (and mandatory TV breaks hurt)'' consensus. As a secondary check we
+also computed $\texttt{running\_team\_pts}$ in the style of \citet{weimer2023causal} and found a
+\emph{positive} exogenous-minus-control gap of $+2.8\%$ to $+14.6\%$ depending on window --- the opposite sign
+from Weimer's reported $-11.2\%$. This is internally consistent with our suffering-team analysis (if the
+suffering team recovers less, the running team must score relatively more) and likely reflects the post-2017
+mandatory-timeout rule changes together with the inferred-rather-than-labeled nature of our TV timeouts.
+
+\subsection{Within-game matched-twin results}
+
+The matched-twin design, which is our cleanest causal test, reverses the headline conclusion of the
+between-group analysis. With $s = 6$ and a 3-minute window we obtain 8{,}906 matched endogenous pairs and
+2{,}667 matched exogenous pairs. The paired mean differences are \textbf{$+0.397$ pts for endogenous
+timeouts} ($t = 27.9$, $p < 0.0001$) and \textbf{$+0.455$ pts for exogenous timeouts} ($t = 11.8$,
+$p < 0.0001$). Both effects are highly significant and both favor the suffering team; the exogenous effect
+is in fact slightly \emph{larger} than the endogenous effect, which is consistent with coaches selectively
+burning timeouts in especially adverse game states where recovery is hard even with help. Breaking the
+treated population into fine subtypes, every subtype shows the same sign and roughly the same magnitude:
+\texttt{coach\_full} $+0.396$ ***, \texttt{coach\_challenge} $+0.714$ * (small sample, $n = 35$),
+\texttt{official\_inferred} $+0.449$ ***, and generic \texttt{stoppage} events $+0.458$ ***. The reversal
+relative to the between-group results is driven by game-level selection: coach timeouts are concentrated in
+low-recovery games, so comparing the endogenous mean to a global control mean absorbs the selection into the
+baseline and erases the signal. Matching within game cancels this bias by construction, and a simpler
+within-game mean comparison gives a consistent $+0.35$ pts effect for endogenous timeouts with the exogenous
+effect shrinking to near zero.
+
+\subsection{Mechanism and moderators}
+
+Once we have a signal, we can ask where it comes from. Stratifying by the number of substitutions in a
+$\pm 30$s window around the event reveals that the endogenous effect is concentrated entirely in timeouts
+accompanied by personnel changes: with 0 substitutions the endogenous-control gap is $-0.05$ (n.s.), with
+1--2 substitutions it is $+0.10$ (n.s.), and with 3 or more substitutions it rises to $+0.21$
+($p < 0.001$). The exogenous penalty is correspondingly largest ($-0.39$, $p < 0.001$) when no subs occur
+and vanishes when many do. This directly confirms the mechanism proposed by \citet{weimer2023causal}: the
+value of a timeout is mediated by substitutions rather than by the pause itself. Conditioning on team quality
+via season-long \texttt{NET\_RATING}, we find that the endogenous benefit is strongest in evenly matched
+games ($+0.23$ pts, $p < 0.05$) and washes out in lopsided matchups where the talent gap dominates the
+trajectory. Finally, stratifying by the running team's in-game PPP we find that when the opponent is shooting
+unusually efficiently (PPP $\geq 1.30$), both effects are amplified and point in opposite directions:
+endogenous timeouts produce $+0.24$ pts of extra recovery ($p < 0.05$) while exogenous timeouts produce
+$-0.62$ pts ($p < 0.001$). This is the clearest evidence in our data of a genuine momentum effect --- a coach
+timeout with substitutions disrupts a hot-shooting opponent, while a pure TV break effectively gives that
+opponent a rest and lets the run continue.
+
+\subsection{Synthesis}
+
+Our headline finding is that timeouts do causally improve the suffering team's short-term recovery --- by
+roughly $+0.4$ points over the following three minutes --- and that this effect is masked in between-group
+analyses by a subtle but severe game-level selection bias. The published consensus of ``no effect'' or
+``slightly negative effect'' \citep{assis2020stop,gibbs2021causal} reproduces in our data only when we use a
+between-group estimator; the within-game matched-twin estimator, which holds game identity approximately
+fixed by construction, produces a strongly positive and highly significant effect for both endogenous and
+exogenous stoppages. The benefit is overwhelmingly mediated by substitutions (in agreement with
+\citet{weimer2023causal}) and is largest in evenly matched games and against hot-shooting opponents, which
+matches both coaching intuition and the conditional-momentum findings of \citet{qiu2025interrupt}. The pause
+alone does essentially nothing; the pause plus a lineup change is worth roughly a third of a possession of
+expected recovery.
+
+\acks{N/A}
+
+% Manual newpage inserted to improve layout of sample file - not
+% needed in general before appendices/bibliography.
+
+\newpage
+
+% \appendix
+% \section{}
+% \label{app:theorem}
+
+% Note: in this sample, the section number is hard-coded in. Following
+% proper LaTeX conventions, it should properly be coded as a reference:
+
+%In this appendix we prove the following theorem from
+%Section~\ref{sec:textree-generalization}:
+
+% In this appendix we prove the following theorem from
+% Section~6.2:
+
+% \noindent
+% {\bf Theorem} {\it Let $u,v,w$ be discrete variables such that $v, w$ do
+% 		not co-occur with $u$ (i.e., $u\neq0\;\Rightarrow \;v=w=0$ in a given
+% 		dataset $\dataset$). Let $N_{v0},N_{w0}$ be the number of data points for
+% 		which $v=0, w=0$ respectively, and let $I_{uv},I_{uw}$ be the
+% 		respective empirical mutual information values based on the sample
+% 		$\dataset$. Then
+% 		\[
+% 				N_{v0} \;>\; N_{w0}\;\;\Rightarrow\;\;I_{uv} \;\leq\;I_{uw}
+% 		\]
+% with equality only if $u$ is identically 0.} \hfill\BlackBox
+
+% \section{}
+
+% \noindent
+% {\bf Proof}. We use the notation:
+% \[
+% 		P_v(i) \;=\;\frac{N_v^i}{N},\;\;\;i \neq 0;\;\;\;
+% 		P_{v0}\;\equiv\;P_v(0)\; = \;1 - \sum_{i\neq 0}P_v(i).
+% \]
+% These values represent the (empirical) probabilities of $v$
+% taking value $i\neq 0$ and 0 respectively.  Entropies will be denoted
+% by $H$. We aim to show that $\fracpartial{I_{uv}}{P_{v0}} < 0$....\\
+
+% {\noindent \em Remainder omitted in this sample. See http://www.jmlr.org/papers/ for full paper.}
+
+% \vskip 0.2in
+\bibliography{references}
+
+\end{document}

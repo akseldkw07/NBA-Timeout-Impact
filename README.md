@@ -6,9 +6,20 @@
 
 Do timeouts have an impact on the game?
 
+Measures of impact:
+
+1. Short-term impact: point differential in the 6 possessions after a timeout vs the 6 possessions before a timeout
+
+> In addition, compare this to the season-long head-to-head point differential between the two teams (normalized by # possessions)
+> In addition, compare this to the season-long points-per-possession for each team, and use the difference as a baseline
+
+2. Short-term impact on momentum: # of points per possession in the 6 possessions after a timeout vs the 6 possessions before a timeout, compared to the season-long points-per-possession for each team
+
+3. Long-term impact: win probability added by the timeout, as estimated by a win probability model (e.g. from nbastatsv3 or a custom model trained on cdnnba data)
+
+In addition, compare the impact of timeouts across different contexts:
 - Home vs Away | Time Remaining | Score Margin | Regular vs Post Season | Team Streak / Run
-- Compare the impact of timeouts called by the coach vs timeouts called by the players vs the impact of media timeouts
-- Compare the point differential in the 5 possessions after a timeout vs the 5 possessions before a timeout, and see if there is a significant difference.
+
 
 ## Data pipeline
 
