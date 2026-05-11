@@ -28,8 +28,8 @@ New York, NY 10027, USA}
 \begin{abstract}%
 		We frame the question ``does an NBA timeout move the game?'' as a battery of
 		one-sample Gaussian signal-detection problems. For three impact metrics
-		derived from the cdnnba 2020--2025 play-by-play feed---excess net points,
-		excess points-per-possession (PPP), and win-probability added---we test
+		derived from the cdnnba 2020--2025 play-by-play feed -- excess net points,
+		excess points-per-possession (PPP), and win-probability added -- we test
 		$H_0\!:\mu = 0$ against $H_1\!:\mu \neq 0$ via the generalized likelihood
 		ratio statistic $G = -2\log\Lambda$, which under $H_0$ is asymptotically
 		$\chi^2_1$. The three metrics are evaluated separately for coach full
@@ -41,7 +41,7 @@ New York, NY 10027, USA}
 		win-probability metric rejects $H_0$ overwhelmingly: full timeouts cost the
 		calling team roughly $3.9$ percentage points of WP across a $\pm 6$
 		possession window, challenges add roughly $1.6$ pp, and television timeouts
-		cost $1.3$ pp---a pattern consistent with the prior causal literature.
+		cost $1.3$ pp -- a pattern consistent with the prior causal literature.
 		Across $163$ stratified GLRTs, we reject $H_0$ in $69$ cases ($42.3\%$),
 		versus the $\sim$$5\%$ expected if the null held everywhere.
 \end{abstract}
@@ -88,7 +88,7 @@ events, and $14{,}538$ inferred \texttt{official\_inferred} (TV) timeouts.
 For each timeout event we look at a window of $W=6$ possessions before and
 $W$ after, and compute three metrics from the calling team's perspective.
 \begin{description}
-		\item[Q1.~\texttt{excess\_net\_post}] Calling-team net points (for--against)
+		\item[Q1.~\texttt{excess\_net\_post}] Calling-team net points (for $-$ against)
 				in the post window, minus the season-PPP-gap expectation
 				$(\mathrm{PPP}_{\text{calling}} - \mathrm{PPP}_{\text{opponent}})\cdot W/2$.
 				$\mu = 0$ corresponds to the calling team performing at the season expectation.
@@ -197,8 +197,8 @@ between pre-timeout net ($\bar x_{\text{pre}} = -1.73$ pts) and
 post-timeout net ($\bar x_{\text{post}} = -0.02$ pts) absorbs into the
 season baseline once we subtract the PPP gap.
 
-\paragraph{Q2.} The PPP metric---which removes the opponent's
-contribution---rejects $H_0$ for both \texttt{full} ($+0.007$ PPP, $p =
+\paragraph{Q2.} The PPP metric -- which removes the opponent's
+contribution -- rejects $H_0$ for both \texttt{full} ($+0.007$ PPP, $p =
 0.008$) and \texttt{official\_inferred} ($+0.013$ PPP, $p = 0.018$).
 The effect is small but real: full coach timeouts add about $0.7\%$ of a
 possession's worth of scoring relative to the calling team's season
@@ -209,9 +209,9 @@ subtype. Full timeouts cost the calling team an average of $3.9$ WP
 percentage points across the $\pm 6$ possession window
 ($G = 1.09\!\times\!10^4$), challenges \emph{add} $1.6$ pp
 ($G = 34$, $p < 10^{-8}$), and TV timeouts cost $1.3$ pp ($G = 245$).
-The challenge sign is intuitive---challenges are issued when a team
+The challenge sign is intuitive -- challenges are issued when a team
 believes it has been wronged, so the post-window typically reflects a
-restored possession or extra free throws---but the negative WP for full
+restored possession or extra free throws -- but the negative WP for full
 coach timeouts is striking, and aligns with the slightly negative ATT
 that \citet{gibbs2021causal} found via genetic matching.
 
@@ -241,7 +241,7 @@ WP ($G = 12{,}992$, $n = 15{,}219$); timeouts called while the calling team
 itself is on a $6$--$9$-point run \emph{add} $+9.5$ pp ($G = 1{,}135$,
 $n = 1{,}470$). Crucially, the magnitude of the signed effect is roughly
 symmetric around streak $= 0$: timeouts do not appear to reverse momentum
-within the post window---they appear to ride it, regardless of which side
+within the post window -- they appear to ride it, regardless of which side
 the timeout was called from.
 
 \begin{figure}[t]
@@ -253,7 +253,7 @@ the timeout was called from.
 \end{figure}
 
 The same stratification on Q1 (Figure~\ref{fig:q1-streak}) is far less
-sharp---the signal is largely absorbed by the PPP-gap baseline---but the
+sharp -- the signal is largely absorbed by the PPP-gap baseline -- but the
 direction matches: down-streak timeouts produce small positive Q1 excesses,
 up-streak timeouts produce small negative ones.
 
@@ -341,9 +341,9 @@ expect under universal $H_0$.
 \label{sec:discussion}
 
 The three metrics behave differently because they absorb different sources
-of variance into the null. Q1 cancels by construction in the aggregate---the
+of variance into the null. Q1 cancels by construction in the aggregate -- the
 PPP-gap baseline is built precisely so that $\mathbb{E}[\,\bar X\,] = 0$
-under no-effect---and only reveals signal once we stratify on a context
+under no-effect -- and only reveals signal once we stratify on a context
 that the baseline does not control for. Q2 leaves opponent variance
 in, which is why even the aggregate test rejects weakly. Q3 measures
 WP, which is non-linear in score margin near the endgame; consequently,
@@ -357,11 +357,7 @@ Whether this reflects a genuine causal failure of the timeout (the
 		calling team was on a hot streak and would have stayed hot anyway, but
 chose to call timeout) or selection bias (coaches call timeouts at very
 specific game states) cannot be answered with these between-group
-GLRTs alone. The companion ``applied-causality'' report on this same
-data resolves part of this ambiguity by adopting a within-game
-matched-twin design, and finds that conditioning on game identity
-flips the headline sign: matched-twin timeouts produce $+0.4$ pts of
-recovery rather than $0$ or $-1.3$ pps of WP. The GLRT signal-detection
+GLRTs alone. The GLRT signal-detection
 view here is best understood as a precise measurement of the
 \emph{observed} pattern; resolving \emph{what causes it} requires the
 matching design, the substitution mediator analysis, or an instrument
@@ -384,11 +380,15 @@ the true mandatory-timeout effect.
 
 \paragraph{Future work.} The natural next step is to replace the
 unconditional null in Equation~\ref{eq:hyp} with a counterfactual null
-that accounts for game state---e.g., comparing each timeout to a
+that accounts for game state -- e.g., comparing each timeout to a
 matched non-timeout possession in the same game, and applying the
 GLRT to the paired difference. This converts the GLRT into a
 within-pair causal estimator and inherits both the variance reduction of
 matching and the asymptotic distribution theory of the GLRT.
+
+\section*{Github Repository}
+
+The code for this project is available at \url{https://github.com/akseldkw07/NBA-Timeout-Impact}
 
 \acks{N/A}
 
