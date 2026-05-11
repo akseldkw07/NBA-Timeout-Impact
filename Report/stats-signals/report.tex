@@ -26,24 +26,27 @@ New York, NY 10027, USA}
 \maketitle
 
 \begin{abstract}%
-		We frame the question ``does an NBA timeout move the game?'' as a battery of
-		one-sample Gaussian signal-detection problems. For three impact metrics
-		derived from the cdnnba 2020--2025 play-by-play feed -- excess net points,
-		excess points-per-possession (PPP), and win-probability added -- we test
-		$H_0\!:\mu = 0$ against $H_1\!:\mu \neq 0$ via the generalized likelihood
-		ratio statistic $G = -2\log\Lambda$, which under $H_0$ is asymptotically
-		$\chi^2_1$. The three metrics are evaluated separately for coach full
-		timeouts, coach challenges, and inferred mandatory television timeouts, and
-		within each subtype we stratify by score margin, streak, game phase, home
-		court, and regular season vs.\ playoffs. The point-differential metric
-		collapses to a null result aggregated, but reveals a structured
-		regression-to-mean signal once stratified by margin or streak. The
-		win-probability metric rejects $H_0$ overwhelmingly: full timeouts cost the
-		calling team roughly $3.9$ percentage points of WP across a $\pm 6$
-		possession window, challenges add roughly $1.6$ pp, and television timeouts
-		cost $1.3$ pp -- a pattern consistent with the prior causal literature.
-		Across $163$ stratified GLRTs, we reject $H_0$ in $69$ cases ($42.3\%$),
-		versus the $\sim$$5\%$ expected if the null held everywhere.
+		What impact do NBA timeouts have on game outcomes? We pose that
+		question as a battery of one-sample Gaussian signal-detection problems,
+		one per impact metric, timeout type, and game-state slice. For three
+		impact metrics derived from the cdnnba 2020--2025 play-by-play feed
+		-- excess net points, excess points-per-possession (PPP), and
+		win-probability added -- we test $H_0\!:\mu = 0$ against
+		$H_1\!:\mu \neq 0$ using the generalized likelihood ratio statistic
+		$G = -2\log\Lambda$, which under $H_0$ is asymptotically $\chi^2_1$.
+		The tests are run separately for coach full timeouts, coach
+		challenges, and inferred mandatory television timeouts, and within
+		each subtype we slice by score margin, streak, game phase, home
+		court, and regular season vs.\ playoffs. The point-differential
+		metric is null in the aggregate but surfaces a clean regression-to-mean
+		pattern once we stratify by margin or streak. The win-probability
+		metric, in contrast, rejects $H_0$ by enormous margins: full coach
+		timeouts cost the calling team about $3.9$ percentage points of WP
+		across a $\pm 6$ possession window, challenges add about $1.6$ pp,
+		and television timeouts cost $1.3$ pp -- broadly aligned with the
+		prior causal literature. Of $163$ stratified GLRTs, $69$ reject at
+		$\alpha = 0.05$ ($42.3\%$), about $8\times$ what we would expect if
+		the null held everywhere.
 \end{abstract}
 
 \begin{keywords}
@@ -54,17 +57,18 @@ New York, NY 10027, USA}
 \section{Problem Statement}
 \label{sec:problem}
 
-The NBA play-by-play feed records, for every coach-called timeout, the game
-state immediately before and after the stoppage. Whether timeouts actually
-``do something'' to the game is contested in the literature
+For every coach-called timeout, the NBA play-by-play feed records the
+state of the game on either side of the stoppage. Whether anything in
+those few possessions actually traces back to the timeout itself is
+genuinely contested
 \citep{assis2020stop,gibbs2021causal,weimer2023causal,qiu2025interrupt}.
-We treat each of three derived per-event impact metrics as a sample from a
-real-valued source and ask the binary signal-detection question
-``is the source mean zero?''
+Rather than try to estimate a causal effect directly, we ask a narrower
+question: for each of three per-event impact metrics, taken within a
+fixed slice of game state, is the population mean zero?
 
-Concretely, let $X_1,\dots,X_n$ be the impact-metric values across timeouts
-within some stratum (e.g.\ full coach timeouts called while leading by
-6--15 points), modeled as iid $\mathcal{N}(\mu, \sigma^2)$ with both
+Let $X_1,\dots,X_n$ be the impact-metric values across timeouts within
+some stratum -- say, full coach timeouts called while leading by 6--15
+points -- and assume $X_i$ iid $\mathcal{N}(\mu, \sigma^2)$ with both
 parameters unknown. We test
 \begin{equation}
 		H_0\!: \mu = 0 \qquad \text{vs.} \qquad H_1\!: \mu \neq 0.
@@ -76,14 +80,15 @@ associated with a non-zero shift in the metric.
 \section{Data and Metrics}
 \label{sec:data}
 
-We use the cdnnba enriched play-by-play feed for the 2020--2025 NBA seasons
-(regular season and playoffs), spanning $4{,}183{,}347$ rows across
-$7{,}457$ games and $1{,}480{,}697$ possessions. Mandatory television
-timeouts are not labeled in the feed; we inject them via a deterministic
-rulebook procedure validated against the explicitly labeled 2013--2016
-nbastatsv3 feed (F1 $= 0.88$--$0.92$). After injection, the cdnnba era
-contains $74{,}236$ \texttt{full} coach timeouts, $1{,}396$ \texttt{challenge}
-events, and $14{,}538$ inferred \texttt{official\_inferred} (TV) timeouts.
+Our data is the cdnnba enriched play-by-play feed for the 2020--2025
+seasons (regular season and playoffs): $4{,}183{,}347$ rows across
+$7{,}457$ games and $1{,}480{,}697$ possessions. The feed does not
+label mandatory TV timeouts, so we inject them with a deterministic
+rulebook procedure and validate the injection against the explicitly
+labeled 2013--2016 nbastatsv3 feed, where it scores F1 between $0.88$
+and $0.92$. After injection the corpus contains $74{,}236$ \texttt{full}
+coach timeouts, $1{,}396$ \texttt{challenge} events, and $14{,}538$
+inferred \texttt{official\_inferred} (TV) timeouts.
 
 For each timeout event we look at a window of $W=6$ possessions before and
 $W$ after, and compute three metrics from the calling team's perspective.
@@ -187,38 +192,39 @@ $(\text{metric}, \text{subtype})$ pair pooled over the entire cdnnba era.
 		\label{tab:overall}
 \end{table}
 
-\paragraph{Q1.} Pooled over the league, the calling team's net post-window
-points cannot be statistically distinguished from the season-PPP
-expectation: $G = 0.98$, $p = 0.32$ for the most populous \texttt{full}
-subtype. This is the canonical null result reported by
-\citet{assis2020stop} and is consistent with the regression-to-the-mean
-explanation: timeouts are most often called from a deficit, and the gap
-between pre-timeout net ($\bar x_{\text{pre}} = -1.73$ pts) and
-post-timeout net ($\bar x_{\text{post}} = -0.02$ pts) absorbs into the
-season baseline once we subtract the PPP gap.
+\paragraph{Q1.} Pooled across the league, Q1 is dead null: $G = 0.98$,
+$p = 0.32$ for the most populous \texttt{full} subtype. This matches
+the null result \citet{assis2020stop} report and is consistent with
+plain regression to the mean. Timeouts are mostly called from a
+deficit, so the gap between pre-timeout net
+($\bar x_{\text{pre}} = -1.73$ pts) and post-timeout net
+($\bar x_{\text{post}} = -0.02$ pts) gets absorbed by the season
+baseline once we subtract the PPP gap.
 
-\paragraph{Q2.} The PPP metric -- which removes the opponent's
-contribution -- rejects $H_0$ for both \texttt{full} ($+0.007$ PPP, $p =
-0.008$) and \texttt{official\_inferred} ($+0.013$ PPP, $p = 0.018$).
-The effect is small but real: full coach timeouts add about $0.7\%$ of a
-possession's worth of scoring relative to the calling team's season
-average, and TV timeouts add about $1.3\%$.
+\paragraph{Q2.} Stripping out the opponent's contribution helps. Q2
+rejects $H_0$ for the \texttt{full} subtype ($+0.007$ PPP, $p = 0.008$)
+and for the \texttt{official\_inferred} subtype ($+0.013$ PPP,
+$p = 0.018$). The effects are small but real: roughly $0.7\%$ of a
+possession's worth of scoring above season pace for coach timeouts, and
+$1.3\%$ for TV timeouts.
 
-\paragraph{Q3.} The WP metric overwhelmingly rejects $H_0$ for every
-subtype. Full timeouts cost the calling team an average of $3.9$ WP
-percentage points across the $\pm 6$ possession window
-($G = 1.09\!\times\!10^4$), challenges \emph{add} $1.6$ pp
-($G = 34$, $p < 10^{-8}$), and TV timeouts cost $1.3$ pp ($G = 245$).
-The challenge sign is intuitive -- challenges are issued when a team
-believes it has been wronged, so the post-window typically reflects a
-restored possession or extra free throws -- but the negative WP for full
-coach timeouts is striking, and aligns with the slightly negative ATT
-that \citet{gibbs2021causal} found via genetic matching.
+\paragraph{Q3.} Q3 rejects $H_0$ for every subtype, by huge margins.
+Full coach timeouts cost the calling team $3.9$ WP percentage points on
+average across the $\pm 6$ possession window
+($G = 1.09\!\times\!10^4$); challenges \emph{add} $1.6$ pp
+($G = 34$, $p < 10^{-8}$); TV timeouts cost $1.3$ pp ($G = 245$). The
+challenge sign is unsurprising -- challenges are filed when a team
+thinks a call went against them, so the post-window typically reflects
+a restored possession or extra free throws. The negative sign on full
+coach timeouts is the more striking finding, and lines up with the
+slightly negative ATT \citet{gibbs2021causal} reported via genetic
+matching.
 
-Figure~\ref{fig:overall-three} shows the GLRT statistics on a log scale
-alongside the sample mean with $95\%$ confidence intervals. The huge
-spread between Q1 and Q3 visualizes the value of measuring impact in WP
-units rather than in raw point swings.
+Figure~\ref{fig:overall-three} plots the GLRT statistics on a log scale
+next to the sample mean and a $95\%$ confidence interval. The
+orders-of-magnitude gap between Q1 and Q3 is most of the story here:
+measuring impact in WP units rather than raw point swings amplifies the
+statistical signal by several orders of magnitude.
 
 \begin{figure}[t]
 		\centering
@@ -233,16 +239,17 @@ units rather than in raw point swings.
 
 \subsection{Stratified by Pre-Timeout Streak}
 
-The streak bucket categorizes the calling team's signed streak (positive
-when the calling team itself has been on a run). Figure~\ref{fig:q3-streak}
-shows that the WP signal is highly heterogeneous: timeouts called \emph{into}
-a $6$--$9$-point opposing run cost the full-timeout caller $-10.3$ pp of
-WP ($G = 12{,}992$, $n = 15{,}219$); timeouts called while the calling team
-itself is on a $6$--$9$-point run \emph{add} $+9.5$ pp ($G = 1{,}135$,
-$n = 1{,}470$). Crucially, the magnitude of the signed effect is roughly
-symmetric around streak $= 0$: timeouts do not appear to reverse momentum
-within the post window -- they appear to ride it, regardless of which side
-the timeout was called from.
+The streak bucket bins the calling team's signed streak; positive means
+the calling team itself has been on the run. Figure~\ref{fig:q3-streak}
+makes clear just how heterogeneous the WP signal is across that
+dimension. Full timeouts called \emph{into} a $6$--$9$-point opposing
+run cost the caller $-10.3$ pp of WP ($G = 12{,}992$, $n = 15{,}219$);
+full timeouts called while the calling team is on its own
+$6$--$9$-point run \emph{add} $+9.5$ pp ($G = 1{,}135$, $n = 1{,}470$).
+The signed effects are roughly symmetric around streak $= 0$, and that
+symmetry is the headline finding here: timeouts do not reverse momentum
+within the post window. They ride it -- regardless of which team called
+them.
 
 \begin{figure}[t]
 		\centering
@@ -252,10 +259,11 @@ the timeout was called from.
 		\label{fig:q3-streak}
 \end{figure}
 
-The same stratification on Q1 (Figure~\ref{fig:q1-streak}) is far less
-sharp -- the signal is largely absorbed by the PPP-gap baseline -- but the
-direction matches: down-streak timeouts produce small positive Q1 excesses,
-up-streak timeouts produce small negative ones.
+Applying the same stratification to Q1 (Figure~\ref{fig:q1-streak})
+gives a much weaker version of the same picture, because the PPP-gap
+baseline absorbs most of the signal. The direction still tracks:
+down-streak timeouts produce small positive Q1 excesses, up-streak
+timeouts produce small negative ones.
 
 \begin{figure}[t]
 		\centering
@@ -267,16 +275,15 @@ up-streak timeouts produce small negative ones.
 
 \subsection{Stratified by Score Margin}
 
-Stratifying on the calling team's score margin
-(Figure~\ref{fig:q1-margin}) exposes a very clean regression-to-mean
-pattern in the point-differential metric that is hidden by aggregation.
-For \texttt{full} timeouts, all three down-by buckets show positive Q1
-excess (\texttt{down15+}: $+0.17$, $G = 24.4$; \texttt{down6-15}: $+0.11$,
-$G = 24.9$) while all three up-by buckets show negative Q1 excess
+Slicing on the calling team's score margin (Figure~\ref{fig:q1-margin})
+recovers a clean regression-to-mean signal in Q1 that pooling erases.
+Every down-by bucket for \texttt{full} timeouts shows positive Q1
+excess (\texttt{down15+}: $+0.17$, $G = 24.4$; \texttt{down6-15}:
+$+0.11$, $G = 24.9$); every up-by bucket shows negative Q1 excess
 (\texttt{up15+}: $-0.26$, $G = 39.5$; \texttt{up6-15}: $-0.16$,
-$G = 37.8$). The same monotone pattern holds, weaker, for inferred TV
-timeouts, but the challenge subtype shows no margin signal due to small
-sample sizes.
+$G = 37.8$). The same monotone pattern persists, more faintly, for
+inferred TV timeouts. The challenge subtype is too small to register a
+margin signal at all.
 
 \begin{figure}[t]
 		\centering
@@ -288,11 +295,12 @@ sample sizes.
 		\label{fig:q1-margin}
 \end{figure}
 
-The Q3 margin stratification (Figure~\ref{fig:q3-margin}) tells a
-complementary story. Full-timeout WP loss is largest in moderately
-adverse situations (\texttt{down6-15}: $-6.1$ pp, $G = 6{,}749$;
-\texttt{down1-5}: $-5.3$ pp, $G = 2{,}562$) and shrinks toward zero in
-extreme leads or deficits where the win is largely already decided.
+The corresponding Q3 margin stratification (Figure~\ref{fig:q3-margin})
+tells a related story from the WP side. Full-timeout WP loss peaks in
+moderately adverse situations (\texttt{down6-15}: $-6.1$ pp,
+$G = 6{,}749$; \texttt{down1-5}: $-5.3$ pp, $G = 2{,}562$) and shrinks
+toward zero in extreme leads or deficits, where the outcome of the game
+is already mostly decided.
 
 \begin{figure}[t]
 		\centering
@@ -303,14 +311,15 @@ extreme leads or deficits where the win is largely already decided.
 
 \subsection{Stratified by Game Phase}
 
-Figure~\ref{fig:q3-time} plots Q3 by quarter, with Q4 split into early
-($> 5$ min remaining) and clutch ($\leq 5$ min). Full-timeout WP cost is
-roughly constant across Q1--Q3 ($-4.0$ to $-4.5$ pp) and OT ($-5.3$ pp),
-but \emph{halves} in Q4-clutch ($-2.0$ pp). This is the period where
-coaches are most strategic about timeout usage and where the WP model
-itself becomes most informative because the score margin grows in
-relative importance. TV-timeout WP cost likewise drops to zero in
-Q4-clutch ($+0.0002$ pp, ns).
+Figure~\ref{fig:q3-time} breaks Q3 out by quarter, with Q4 split into
+early ($> 5$ min remaining) and clutch ($\leq 5$ min). The full-timeout
+WP cost is roughly flat across Q1--Q3 ($-4.0$ to $-4.5$ pp) and OT
+($-5.3$ pp), but \emph{halves} in Q4-clutch, to $-2.0$ pp. Two
+forces probably contribute to that drop: coaches are most deliberate
+about timeout spending in clutch time, and the WP model itself is most
+informative in those windows because each remaining possession carries
+more leverage. TV timeouts behave similarly -- their WP cost
+collapses to zero in Q4-clutch ($+0.0002$ pp, ns).
 
 \begin{figure}[t]
 		\centering
@@ -321,13 +330,13 @@ Q4-clutch ($+0.0002$ pp, ns).
 
 \subsection{Pooled Distribution of Test Statistics}
 
-Across the four stratification schemes (overall, streak, margin, time)
-and the three impact metrics, we ran $163$ stratified GLRTs and rejected
-$H_0$ in $69$ ($42.3\%$). The empirical distribution of $G$ values is
-strongly right-shifted relative to its asymptotic $\chi^2_1$ null
-(Figure~\ref{fig:null-dist}), confirming that the rejections reflect
-real signal rather than the $\sim\!5\%$ false-positive rate one would
-expect under universal $H_0$.
+Across four stratification schemes (overall, streak, margin, time) and
+three impact metrics we ran $163$ stratified GLRTs in total, and $69$
+of them reject $H_0$ at $\alpha = 0.05$ -- $42.3\%$, about $8\times$
+the rate we would expect under a universal null. Figure~\ref{fig:null-dist}
+plots the empirical distribution of $G$ values against its $\chi^2_1$
+reference. The shift to the right is heavy, which is what you would
+see if many of those rejections are genuine signal rather than chance.
 
 \begin{figure}[t]
 		\centering
@@ -340,51 +349,55 @@ expect under universal $H_0$.
 \section{Discussion}
 \label{sec:discussion}
 
-The three metrics behave differently because they absorb different sources
-of variance into the null. Q1 cancels by construction in the aggregate -- the
-PPP-gap baseline is built precisely so that $\mathbb{E}[\,\bar X\,] = 0$
-under no-effect -- and only reveals signal once we stratify on a context
-that the baseline does not control for. Q2 leaves opponent variance
-in, which is why even the aggregate test rejects weakly. Q3 measures
-WP, which is non-linear in score margin near the endgame; consequently,
-the same ${\sim}1$-point swing produces drastically different WP
-movements depending on game state, and the GLRT exposes this with very
-high statistical power.
+The three metrics behave so differently because each one packs the
+noise into the null in a different way. Q1 cancels by construction in
+the aggregate: the PPP-gap baseline is engineered so that
+$\mathbb{E}[\,\bar X\,] = 0$ under no-effect. Signal only re-emerges
+once we stratify on a context that the baseline does not already know
+about. Q2 leaves the opponent's contribution in, which is why even the
+aggregate test rejects weakly. Q3 is fundamentally different: WP is
+non-linear in score margin, especially in the endgame, so a single
+$\sim\!1$-point swing can move WP by an order of magnitude more in
+clutch time than at tip-off. That is why even tiny mean shifts in WP
+produce GLRT statistics in the thousands.
 
-The signed-WP signal in Figure~\ref{fig:q3-streak} is the clearest
-single result: \emph{timeouts ride momentum, they don't reverse it}.
-Whether this reflects a genuine causal failure of the timeout (the
-		calling team was on a hot streak and would have stayed hot anyway, but
-chose to call timeout) or selection bias (coaches call timeouts at very
-specific game states) cannot be answered with these between-group
-GLRTs alone. The GLRT signal-detection
-view here is best understood as a precise measurement of the
-\emph{observed} pattern; resolving \emph{what causes it} requires the
-matching design, the substitution mediator analysis, or an instrument
-in the spirit of \citet{weimer2023causal}.
+The single clearest finding in the whole report is the signed-WP
+picture in Figure~\ref{fig:q3-streak}: \emph{timeouts ride momentum,
+they do not reverse it}. Whether that reflects a genuine causal failure
+of the timeout (the calling team was hot, and would have stayed hot
+anyway) or selection bias (coaches call timeouts in specific,
+predictable game states) is something between-group GLRTs cannot
+answer on their own. What our tests do is pin down the \emph{observed}
+pattern with high precision. Recovering the \emph{cause} of that
+pattern requires matching, mediator analysis, or an instrument in the
+spirit of \citet{weimer2023causal}.
 
-\paragraph{Limitations.} (i) The GLRT relies on Gaussianity of the impact
-metric. Q1 and Q2 are noisy averages of point counts and are
-approximately Gaussian by CLT; Q3 is an output of a logistic model and
-is bounded in $[-1, 1]$, so the Gaussian assumption is violated near the
-endpoints. Empirically the t-test and GLRT $p$-values agree to four
-decimal places throughout, suggesting the violation is mild for $n$ this
-large, but a non-parametric permutation test would be a robust check.
-(ii) The $163$ tests are not independent (the same events appear in
-multiple stratifications) so a Bonferroni or Benjamini--Hochberg
-correction would be conservative; we report uncorrected $p$-values.
-(iii) The TV-timeout cohort is rulebook-inferred rather than labeled,
-with F1 $\approx 0.9$ in the validation era, so the
-\texttt{official\_inferred} effects should be read as a lower bound on
-the true mandatory-timeout effect.
+\paragraph{Limitations.} A few worth flagging. First, this investigation seeks to understand the statistical
+properties of timeout impacts via GLRT. It is \textbf{not} a causal inference study. It would be
+misleading to interpret the results as causal effects, when they're explicitly statistical observations.
+Second, the GLRT relies on the underlying metric being Gaussian. Q1 and Q2 are noisy averages
+of point counts and are approximately Gaussian by CLT; Q3 is the output
+of a logistic model and is bounded in $[-1, 1]$, so the Gaussian
+assumption breaks near the endpoints. In practice the $t$-test and
+GLRT $p$-values agree to four decimal places throughout, which is
+reassuring, but a non-parametric permutation test would be a more
+rigorous check. Third, the $163$ tests are not independent -- many
+events appear in multiple stratifications -- so a
+Bonferroni or Benjamini--Hochberg correction would over-correct here;
+we report uncorrected $p$-values. Finally, the TV-timeout cohort is
+rulebook-inferred rather than ground-truth labeled, with
+F1 $\approx 0.9$ against the validation era, so the
+\texttt{official\_inferred} effect sizes should be read as a lower
+bound on the true mandatory-timeout effect.
 
-\paragraph{Future work.} The natural next step is to replace the
-unconditional null in Equation~\ref{eq:hyp} with a counterfactual null
-that accounts for game state -- e.g., comparing each timeout to a
-matched non-timeout possession in the same game, and applying the
-GLRT to the paired difference. This converts the GLRT into a
-within-pair causal estimator and inherits both the variance reduction of
-matching and the asymptotic distribution theory of the GLRT.
+\paragraph{Future work.} The cleanest extension is to swap the
+unconditional null in Equation~\ref{eq:hyp} for a counterfactual null
+that conditions on game state. The recipe: for each timeout, find a
+matched non-timeout possession in the same game, take the paired
+difference of the impact metric, and run the GLRT on those differences.
+That turns the GLRT into a within-pair causal estimator and keeps both
+the variance reduction of matching and the asymptotic distribution
+theory of the test.
 
 \section*{Github Repository}
 
