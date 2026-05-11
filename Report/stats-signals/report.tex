@@ -26,8 +26,8 @@ New York, NY 10027, USA}
 \maketitle
 
 \begin{abstract}%
-		Does an NBA timeout actually do anything to a game? We pose that
-		question as a series of one-sample Gaussian signal-detection problems,
+		What impact do NBA timeouts have on game outcomes? We pose that
+		question as a battery of one-sample Gaussian signal-detection problems,
 		one per impact metric, timeout type, and game-state slice. For three
 		impact metrics derived from the cdnnba 2020--2025 play-by-play feed
 		-- excess net points, excess points-per-possession (PPP), and
@@ -74,7 +74,7 @@ parameters unknown. We test
 		H_0\!: \mu = 0 \qquad \text{vs.} \qquad H_1\!: \mu \neq 0.
 		\label{eq:hyp}
 \end{equation}
-A rejection says the timeout type, conditioned on the stratum, is
+A rejection means the timeout type, conditioned on the stratum, is
 associated with a non-zero shift in the metric.
 
 \section{Data and Metrics}
@@ -372,17 +372,19 @@ pattern with high precision. Recovering the \emph{cause} of that
 pattern requires matching, mediator analysis, or an instrument in the
 spirit of \citet{weimer2023causal}.
 
-\paragraph{Limitations.} A few worth flagging. First, the GLRT relies
-on the underlying metric being Gaussian. Q1 and Q2 are noisy averages
+\paragraph{Limitations.} A few worth flagging. First, this investigation seeks to understand the statistical
+properties of timeout impacts via GLRT. It is \textbf{not} a causal inference study. It would be
+misleading to interpret the results as causal effects, when they're explicitly statistical observations.
+Second, the GLRT relies on the underlying metric being Gaussian. Q1 and Q2 are noisy averages
 of point counts and are approximately Gaussian by CLT; Q3 is the output
 of a logistic model and is bounded in $[-1, 1]$, so the Gaussian
 assumption breaks near the endpoints. In practice the $t$-test and
 GLRT $p$-values agree to four decimal places throughout, which is
 reassuring, but a non-parametric permutation test would be a more
-rigorous check. Second, the $163$ tests are not independent -- many
+rigorous check. Third, the $163$ tests are not independent -- many
 events appear in multiple stratifications -- so a
 Bonferroni or Benjamini--Hochberg correction would over-correct here;
-we report uncorrected $p$-values. Third, the TV-timeout cohort is
+we report uncorrected $p$-values. Finally, the TV-timeout cohort is
 rulebook-inferred rather than ground-truth labeled, with
 F1 $\approx 0.9$ against the validation era, so the
 \texttt{official\_inferred} effect sizes should be read as a lower
