@@ -415,6 +415,7 @@ class CDNNBADatasetPL(Enriched_DF_PL):
         period_col: str = "period",
         sr_col: str = "seconds_remaining",
         order_col: str = "orderNumber",
+        multi_fire: bool = True,
     ) -> pl.DataFrame:
         """Rulebook-based inference of mandatory TV timeouts.
 
@@ -498,14 +499,37 @@ class CDNNBADatasetPL(Enriched_DF_PL):
 
         grouped = working.group_by([gameId_col, period_col], maintain_order=True).agg(*agg_exprs)
 
-        # Determine which slot actually fires.
-        # Slot k fires iff for all j < k the slot was either absorbed OR had no
-        # fire candidate, AND slot k is not absorbed and has a fire candidate.
-        # Build a chain of when/then (no .otherwise() until the end so we can
-        # keep appending branches — otherwise() returns a plain Expr).
+        if multi_fire:
+            # Independent firing: each unabsorbed slot with a fire candidate
+            # produces its own row. Matches the modern (post-2017) rulebook,
+            # which guarantees two mandatory timeouts per period (one per
+            # slot), each absorbed only by a coach timeout in its own window.
+            slot_dfs = []
+            for t in thresholds:
+                absorbed = pl.col(f"absorbed_{t}")
+                fo = pl.col(f"fire_order_{t}")
+                fsr = pl.col(f"fire_sr_{t}")
+                slot_df = grouped.filter(~absorbed & fo.is_not_null()).select(
+                    pl.col(gameId_col),
+                    pl.col(period_col),
+                    fsr.alias(sr_col),
+                    fo.alias("order_before"),
+                )
+                slot_dfs.append(slot_df)
+            if not slot_dfs:
+                schema = {gameId_col: pl.Int64, period_col: pl.Int64, sr_col: pl.Float64, "order_before": pl.Int64}
+                return pl.DataFrame(schema=schema)
+            return pl.concat(slot_dfs).sort(gameId_col, period_col, "order_before")
+
+        # Cascading firing (multi_fire=False): only the FIRST unabsorbed slot
+        # with a fire candidate fires per period. Slot k fires iff every prior
+        # slot was either absorbed OR had no fire candidate, AND slot k is
+        # unabsorbed with a fire candidate. Matches pre-2017 v3 ground-truth
+        # rules (single mandatory per period, falling through to the next
+        # mark only when the prior one is unavailable).
         fire_order_chain = None  # polars Then object
         fire_sr_chain = None
-        prior_invalid_expr = pl.lit(True)  # all prior slots were invalid (no fire)
+        prior_invalid_expr = pl.lit(True)
         for t in thresholds:
             absorbed = pl.col(f"absorbed_{t}")
             fo = pl.col(f"fire_order_{t}")
@@ -517,7 +541,6 @@ class CDNNBADatasetPL(Enriched_DF_PL):
             else:
                 fire_order_chain = fire_order_chain.when(slot_fires).then(fo)
                 fire_sr_chain = fire_sr_chain.when(slot_fires).then(fsr)  # type: ignore[assignment]
-            # Slot was invalid iff absorbed OR no fire candidate
             prior_invalid_expr = prior_invalid_expr & (absorbed | fo.is_null())
 
         assert fire_order_chain is not None and fire_sr_chain is not None

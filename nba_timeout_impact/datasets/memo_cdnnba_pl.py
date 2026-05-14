@@ -149,11 +149,31 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         df = self.cdnnba
         return (df["actionType"] == "stoppage") & (df["subType"] == subtype)
 
+    @memo_series
+    def f_coach_challenge(self):
+        """Coaching Challenge"""
+        df = self.cdnnba
+        return (df["actionType"] == "timeout") & (df["subType"] == "challenge")
+
     # -- lead & lead change --
 
     @memo_series
     def lead(self) -> pl.Series:
         return self.cdnnba["scoreHome"] - self.cdnnba["scoreAway"]
+
+    @memo_series
+    def wall_clock_delta_seconds(self) -> pl.Series:
+        """Real-world seconds between this event and the previous event in the same game.
+
+        Computed from `timeActual` (UTC datetime). The first event of each game
+        is null. Rulebook-injected TV timeouts have `timeActual=null` by
+        construction, so their own delta and the next event's delta are both
+        null.
+        """
+        df = self.cdnnba
+        game_boundary = (df["gameId"] != df["gameId"].shift(1)).fill_null(True)
+        delta_ms = (df["timeActual"] - df["timeActual"].shift(1)).dt.total_milliseconds()
+        return (delta_ms / 1000.0).set(game_boundary, None).alias("wall_clock_delta_seconds")
 
     @memo_fn
     def lead_change_n_mins(self, n: float) -> pl.Series:

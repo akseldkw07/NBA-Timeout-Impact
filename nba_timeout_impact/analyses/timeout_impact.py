@@ -79,10 +79,7 @@ def compute_team_season_ppp(memo: CDNNBAMemoPL) -> pl.DataFrame:
     out = (
         poss.filter(pl.col("possession") > 0)
         .group_by("season", "season_type", pl.col("possession").alias("teamId"))
-        .agg(
-            pl.col("possession_points").sum().alias("total_pts"),
-            pl.len().alias("n_poss"),
-        )
+        .agg(pl.col("possession_points").sum().alias("total_pts"), pl.len().alias("n_poss"))
         .with_columns((pl.col("total_pts") / pl.col("n_poss")).alias("ppp"))
         .sort("season", "season_type", "teamId")
     )
@@ -122,10 +119,7 @@ def compute_team_season_record(memo: CDNNBAMemoPL) -> pl.DataFrame:
     )
     return (
         team_games.group_by("season", "teamId")
-        .agg(
-            pl.col("won").sum().alias("wins"),
-            (~pl.col("won")).sum().alias("losses"),
-        )
+        .agg(pl.col("won").sum().alias("wins"), (~pl.col("won")).sum().alias("losses"))
         .with_columns((pl.col("wins") / (pl.col("wins") + pl.col("losses"))).alias("wpct"))
         .sort("season", "teamId")
     )
@@ -159,14 +153,12 @@ def compute_h2h_pt_diff(memo: CDNNBAMemoPL) -> pl.DataFrame:
         .join(home, on="gameId")
         .join(final, on="gameId")
         .join(poss_per_game, on="gameId")
-        .with_columns(
-            (pl.col("teamId_a") == pl.col("home_teamId")).alias("a_is_home"),
-        )
+        .with_columns((pl.col("teamId_a") == pl.col("home_teamId")).alias("a_is_home"))
         .with_columns(
             pl.when(pl.col("a_is_home"))
             .then(pl.col("final_home") - pl.col("final_away"))
             .otherwise(pl.col("final_away") - pl.col("final_home"))
-            .alias("pt_diff_a"),
+            .alias("pt_diff_a")
         )
     )
 
@@ -331,7 +323,7 @@ def build_timeout_events(memo: CDNNBAMemoPL, window: int = 6) -> pl.DataFrame:
         pl.when(pl.col("is_home_calling"))
         .then(pl.col("_streak_home"))
         .otherwise(-pl.col("_streak_home"))
-        .alias("streak_signed"),
+        .alias("streak_signed")
     )
 
     # ---- 6. Context buckets ----
@@ -408,11 +400,7 @@ def add_context_buckets(events: pl.DataFrame) -> pl.DataFrame:
 
 
 def attach_baselines(
-    events: pl.DataFrame,
-    team_ppp: pl.DataFrame,
-    h2h: pl.DataFrame,
-    *,
-    window: int = 6,
+    events: pl.DataFrame, team_ppp: pl.DataFrame, h2h: pl.DataFrame, *, window: int = 6
 ) -> pl.DataFrame:
     """Left-join per-team season PPP, opponent PPP, and head-to-head margin/poss.
 
@@ -429,16 +417,10 @@ def attach_baselines(
     W_per_team = window // 2
 
     calling_ppp = team_ppp.select(
-        "season",
-        "season_type",
-        pl.col("teamId").alias("calling_team"),
-        pl.col("ppp").alias("calling_team_ppp"),
+        "season", "season_type", pl.col("teamId").alias("calling_team"), pl.col("ppp").alias("calling_team_ppp")
     )
     opp_ppp = team_ppp.select(
-        "season",
-        "season_type",
-        pl.col("teamId").alias("opponent_team"),
-        pl.col("ppp").alias("opponent_team_ppp"),
+        "season", "season_type", pl.col("teamId").alias("opponent_team"), pl.col("ppp").alias("opponent_team_ppp")
     )
 
     h2h_join = h2h.select(
@@ -453,9 +435,7 @@ def attach_baselines(
         events.join(calling_ppp, on=["season", "season_type", "calling_team"], how="left")
         .join(opp_ppp, on=["season", "season_type", "opponent_team"], how="left")
         .join(h2h_join, on=["season", "season_type", "calling_team", "opponent_team"], how="left")
-        .with_columns(
-            (pl.col("calling_team_ppp") - pl.col("opponent_team_ppp")).alias("expected_net_per_poss"),
-        )
+        .with_columns((pl.col("calling_team_ppp") - pl.col("opponent_team_ppp")).alias("expected_net_per_poss"))
         .with_columns(
             (pl.col("expected_net_per_poss") * W_per_team).alias("expected_net_window"),
             (pl.col("h2h_pt_diff_per_poss") * W_per_team).alias("h2h_expected_net_window"),
@@ -481,7 +461,7 @@ def _welch_t(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     if len(a) < 2 or len(b) < 2:
         return (float("nan"), float("nan"))
     t_stat, p = sp_stats.ttest_ind(a, b, equal_var=False)
-    return float(t_stat), float(p)
+    return float(t_stat), float(p)  # type: ignore
 
 
 def summarize_pre_post(
@@ -548,10 +528,7 @@ def summarize_pre_post(
         tstats.append(t_stat)
         pvals.append(p)
 
-    summary = summary.with_columns(
-        pl.Series("t_stat", tstats),
-        pl.Series("p_value", pvals),
-    )
+    summary = summary.with_columns(pl.Series("t_stat", tstats), pl.Series("p_value", pvals))
     return summary
 
 
@@ -573,19 +550,19 @@ def summarize_overall_table(events: pl.DataFrame) -> pl.DataFrame:
             {
                 "group": label,
                 "n": sub.height,
-                "net_pre_mean": float(sub["net_pre"].mean()),
-                "net_post_mean": float(sub["net_post"].mean()),
-                "delta_mean": float((sub["net_post"] - sub["net_pre"]).mean()),
-                "ppp_for_pre_mean": float(sub["ppp_for_pre"].mean()),
-                "ppp_for_post_mean": float(sub["ppp_for_post"].mean()),
+                "net_pre_mean": float(sub["net_pre"].mean()),  # type: ignore
+                "net_post_mean": float(sub["net_post"].mean()),  # type: ignore
+                "delta_mean": float((sub["net_post"] - sub["net_pre"]).mean()),  # type: ignore
+                "ppp_for_pre_mean": float(sub["ppp_for_pre"].mean()),  # type: ignore
+                "ppp_for_post_mean": float(sub["ppp_for_post"].mean()),  # type: ignore
                 "excess_net_post_mean": (
-                    float(sub["excess_net_post"].mean()) if "excess_net_post" in sub.columns else None
+                    float(sub["excess_net_post"].mean()) if "excess_net_post" in sub.columns else None  # type: ignore
                 ),
                 "excess_h2h_net_post_mean": (
-                    float(sub["excess_h2h_net_post"].mean()) if "excess_h2h_net_post" in sub.columns else None
+                    float(sub["excess_h2h_net_post"].mean()) if "excess_h2h_net_post" in sub.columns else None  # type: ignore
                 ),
                 "excess_ppp_for_post_mean": (
-                    float(sub["excess_ppp_for_post"].mean()) if "excess_ppp_for_post" in sub.columns else None
+                    float(sub["excess_ppp_for_post"].mean()) if "excess_ppp_for_post" in sub.columns else None  # type: ignore
                 ),
                 "t_stat_post_vs_pre": net_t,
                 "p_value_post_vs_pre": net_p,
