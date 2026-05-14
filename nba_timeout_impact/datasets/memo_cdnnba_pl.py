@@ -161,6 +161,17 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
     def lead(self) -> pl.Series:
         return self.cdnnba["scoreHome"] - self.cdnnba["scoreAway"]
 
+    @memo_fn
+    def sr_bin(self, width: int = 60) -> pl.Series:
+        """Bin ``seconds_remaining`` into integer buckets of ``width`` seconds.
+
+        The label is the bin's floor in seconds (e.g. width=60 gives 0, 60, 120, ...).
+        Used to coarse-grain the distribution of events relative to the
+        period clock — useful for histograms of timeout density at the
+        rulebook trigger marks (e.g. 6:59 ≈ bin 420).
+        """
+        return ((self.cdnnba["seconds_remaining"] // width) * width).cast(pl.Int32).alias(f"sr_bin_{width}s")
+
     @memo_series
     def wall_clock_delta_seconds(self) -> pl.Series:
         """Real-world seconds between this event and the previous event in the same game.
