@@ -100,6 +100,13 @@ class NBAMemoDF(MemoDataFrame[NBADatasetInput_TypedDict]):
         )
         return pd.Series(merged["WCTIMESTRING"].to_numpy(), index=v3.index, name="WCTIMESTRING")
 
+    """TIME"""
+
+    @memo_fn
+    def bin_sr(self, width: int = 60):
+        arr = (self.data["seconds_remaining"] // width) * width
+        return pd.Categorical(arr)
+
     """PTRS"""
 
     @property

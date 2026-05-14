@@ -162,7 +162,7 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         return self.cdnnba["scoreHome"] - self.cdnnba["scoreAway"]
 
     @memo_fn
-    def sr_bin(self, width: int = 60) -> pl.Series:
+    def bin_sr(self, width: int = 60) -> pl.Series:
         """Bin ``seconds_remaining`` into integer buckets of ``width`` seconds.
 
         The label is the bin's floor in seconds (e.g. width=60 gives 0, 60, 120, ...).

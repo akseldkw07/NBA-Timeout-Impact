@@ -341,20 +341,12 @@ class TVTimeoutValidation:
         classified = TVTimeoutValidation.classify_timeouts(v3_pl, source="v3", pre_2017_mode=pre_2017_mode)
 
         pred = classified.filter(pl.col("timeout_role").str.contains("_mandatory")).select(
-            "gameId",
-            "period",
-            "season",
-            pl.col("seconds_remaining").round().cast(pl.Int64).alias("sr"),
+            "gameId", "period", "season", pl.col("seconds_remaining").round().cast(pl.Int64).alias("sr")
         )
         gt = classified.filter(
             (pl.col("actionType").cast(pl.String).str.strip_chars() == "Timeout")
             & pl.col("subType").cast(pl.String).str.strip_chars().is_in(["Official", "Official TV"])
-        ).select(
-            "gameId",
-            "period",
-            "season",
-            pl.col("seconds_remaining").round().cast(pl.Int64).alias("sr"),
-        )
+        ).select("gameId", "period", "season", pl.col("seconds_remaining").round().cast(pl.Int64).alias("sr"))
 
         pred_g = pred.group_by(["gameId", "period", "season"], maintain_order=True).agg(pl.col("sr"))
         gt_g = gt.group_by(["gameId", "period", "season"], maintain_order=True).agg(pl.col("sr"))
