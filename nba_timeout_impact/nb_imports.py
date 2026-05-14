@@ -13,3 +13,4 @@ from nba_timeout_impact.datasets.memo_cdnnba import CDNNBADataset, CDNNBADataset
 from nba_timeout_impact.datasets.memo_cdnnba_pl import CDNNBADatasetInputPL, CDNNBADatasetPL, CDNNBAMemoPL
 from nba_timeout_impact.datasets.memo_nbastatsv3 import NBADataset, NBADatasetInput_TypedDict, NBAMemoDF
 from nba_timeout_impact.plotting_utils.nba_plotting_utils_depr import NBAPlottingUtils
+from nba_timeout_impact.plotting_utils.timeout_injection_plots import TimeoutInjectionPlots
