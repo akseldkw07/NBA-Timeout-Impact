@@ -88,7 +88,7 @@ POST_2017_SLOTS = [
 @dataclass
 class ValidationResult:
     label: str
-    seasons: tuple[int, int]
+    seasons: tuple[int, int] | None
     n_gt: int
     n_pred: int
     tp: int
@@ -192,7 +192,7 @@ class TVTimeoutValidation:
     # ---------- v3-era validation ----------
 
     @staticmethod
-    def _prep_v3(memo: NBAMemoDF, seasons: tuple[int, int]) -> pl.DataFrame:
+    def _prep_v3(memo: NBAMemoDF, seasons: tuple[int, int] | None = None) -> pl.DataFrame:
         v3 = memo.data
         cols = [
             "gameId",
@@ -206,7 +206,10 @@ class TVTimeoutValidation:
             "personId",
         ]
         cols = [c for c in cols if c in v3.columns]
-        sub = v3[(v3["season"] >= seasons[0]) & (v3["season"] <= seasons[1])][cols].copy()
+        if seasons is None:
+            sub = v3[cols].copy()
+        else:
+            sub = v3[(v3["season"] >= seasons[0]) & (v3["season"] <= seasons[1])][cols].copy()
         for col in ("actionType", "subType"):
             sub[col] = sub[col].astype("string").str.strip()
         return pl.from_pandas(sub)
@@ -214,7 +217,7 @@ class TVTimeoutValidation:
     @staticmethod
     def validate_against_v3(
         memo: NBAMemoDF,
-        seasons: tuple[int, int] = (1998, 2016),
+        seasons: tuple[int, int] | None = None,
         label: str = "v3 reclassification",
     ) -> ValidationResult:
         """Score ``classify_timeouts`` predictions against v3 ground-truth
@@ -225,7 +228,7 @@ class TVTimeoutValidation:
         return _score_generic(classified, _v3_gt_mask(), seasons=seasons, label=label, action="Timeout")
 
     @staticmethod
-    def confusion_matrix_v3(memo: NBAMemoDF, seasons: tuple[int, int] = (1998, 2016)) -> pd.DataFrame:
+    def confusion_matrix_v3(memo: NBAMemoDF, seasons: tuple[int, int] | None = None) -> pd.DataFrame:
         v3_pl = TVTimeoutValidation._prep_v3(memo, seasons)
         classified = TVTimeoutValidation.classify_timeouts(v3_pl, source="v3", seasons=seasons)
         tos = (
@@ -241,12 +244,13 @@ class TVTimeoutValidation:
     # ---------- cdnnba-era validation ----------
 
     @staticmethod
-    def _prep_cdnnba(memo, seasons: tuple[int, int]) -> pl.DataFrame:
+    def _prep_cdnnba(memo, seasons: tuple[int, int] | None = None) -> pl.DataFrame:
         """Prep cdnnba feed for classification. Accepts a polars memo
         (``CDNNBAMemoPL`` subclasses ``pl.DataFrame``), a wrapper with
         ``.data``, a raw polars DataFrame, or a pandas DataFrame.
         Keeps ``qualifiers`` (mandatory signal) and ``timeActual``
-        (wall-clock, for diagnostic plots).
+        (wall-clock, for diagnostic plots). ``seasons=None`` skips the
+        season filter entirely.
         """
         # MemoDataFramePL inherits from pl.DataFrame, so check pl FIRST —
         # the ``hasattr(memo, "data")`` path is only for pandas-style memos.
@@ -256,6 +260,24 @@ class TVTimeoutValidation:
             df = memo.data
         else:
             df = memo
+
+        # If the caller passed a ``CDNNBAMemoPL`` (or any memo exposing the
+        # ``timeout_duration_s`` ``@memo_series``), materialize it as a
+        # regular column so downstream plotting can read it without having
+        # to recompute. Plain ``pl.DataFrame`` inputs skip this — they
+        # don't carry the memo. ``getattr`` (not attribute access) because
+        # the type of ``memo`` is not statically known to declare this.
+        if (
+            hasattr(type(memo), "timeout_duration_s")
+            and isinstance(df, pl.DataFrame)
+            and "timeout_duration_s" not in df.columns
+        ):
+            try:
+                dur = getattr(memo, "timeout_duration_s")
+                if isinstance(dur, pl.Series) and len(dur) == df.height:
+                    df = df.with_columns(dur.alias("timeout_duration_s"))
+            except Exception:  # noqa: BLE001 — memo may not be ready; degrade gracefully
+                pass
 
         wanted = [
             "gameId",
@@ -271,15 +293,21 @@ class TVTimeoutValidation:
             "teamTricode",
             "qualifiers",
             "timeActual",
+            "timeout_duration_s",
         ]
 
         if isinstance(df, pl.DataFrame):
             cols = [c for c in wanted if c in df.columns]
+            if seasons is None:
+                return df.select(cols)
             return df.filter((pl.col("season") >= seasons[0]) & (pl.col("season") <= seasons[1])).select(cols)
 
         # pandas path
         cols = [c for c in wanted if c in df.columns]
-        sub = df[(df["season"] >= seasons[0]) & (df["season"] <= seasons[1])][cols].copy()
+        if seasons is None:
+            sub = df[cols].copy()
+        else:
+            sub = df[(df["season"] >= seasons[0]) & (df["season"] <= seasons[1])][cols].copy()
         for col in ("actionType", "subType"):
             sub[col] = sub[col].astype("string").str.strip()
         return pl.from_pandas(sub)
@@ -287,7 +315,7 @@ class TVTimeoutValidation:
     @staticmethod
     def validate_against_cdnnba(
         memo,
-        seasons: tuple[int, int] = (2020, 2025),
+        seasons: tuple[int, int] | None = None,
         label: str = "cdnnba reclassification",
     ) -> ValidationResult:
         """Score ``classify_timeouts`` predictions against cdnnba's
@@ -306,14 +334,14 @@ class TVTimeoutValidation:
     @staticmethod
     def _score_row_by_row(
         classified: pl.DataFrame,
-        seasons: tuple[int, int],
+        seasons: tuple[int, int] | None = None,
         tolerance_s: int = 0,  # noqa: ARG004 — accepted for back-compat
         label: str = "v3 reclassification",
     ) -> ValidationResult:
         return _score_generic(classified, _v3_gt_mask(), seasons=seasons, label=label, action="Timeout")
 
     @staticmethod
-    def confusion_matrix_cdnnba(memo, seasons: tuple[int, int] = (2020, 2025)) -> pd.DataFrame:
+    def confusion_matrix_cdnnba(memo, seasons: tuple[int, int] | None = None) -> pd.DataFrame:
         cdn_pl = TVTimeoutValidation._prep_cdnnba(memo, seasons)
         classified = TVTimeoutValidation.classify_timeouts(cdn_pl, source="cdnnba", seasons=seasons)
         tos = (
@@ -378,7 +406,7 @@ def _cdnnba_gt_mask() -> pl.Expr:
 def _score_generic(
     classified: pl.DataFrame,
     gt_mask: pl.Expr,
-    seasons: tuple[int, int],
+    seasons: tuple[int, int] | None,
     label: str,
     action: str,
 ) -> ValidationResult:

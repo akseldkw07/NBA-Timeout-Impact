@@ -89,7 +89,7 @@ class TimeoutInjectionPlots:
             ax.set_ylabel(f"count (bin = {width}s)")
             ax.set_title(
                 f"v3 mandatory timeouts in Q{'/'.join(map(str, periods))} "
-                f"(seasons {r_v3.seasons[0]}-{r_v3.seasons[1]}), sr_bin = {width}s"
+                f"(seasons {r_v3.seasons[0]}-{r_v3.seasons[1]}), sr_bin = {width}s"  # type: ignore[f-string-without-interpolation]
             )
             ax.legend(loc="upper right", fontsize=8)
             if i == len(axes) - 1:
@@ -138,7 +138,6 @@ class TimeoutInjectionPlots:
         c_tp, c_fp, c_fn = colors
 
         fig, axes = UKS_MPL.subplots(1, len(widths), width_per=width_per, height_per=height_per, sharex=True)
-        axes = list(np.atleast_1d(axes).ravel())
         for i, (ax, width) in enumerate(zip(axes, widths)):
             bins = np.arange(0, 720 + width, width)
             ax.hist(
@@ -155,7 +154,7 @@ class TimeoutInjectionPlots:
             ax.set_ylabel(f"count (bin = {width}s)")
             ax.set_title(
                 f"v3 mandatory row-by-row outcomes in Q{'/'.join(map(str, periods))} "
-                f"(seasons {r_v3.seasons[0]}-{r_v3.seasons[1]}), sr_bin = {width}s"
+                f"(seasons {r_v3.seasons[0]}-{r_v3.seasons[1]}), sr_bin = {width}s"  # type: ignore[f-string-without-interpolation]
             )
             ax.legend(loc="upper right", fontsize=8)
             if i == len(axes) - 1:
@@ -208,14 +207,13 @@ class TimeoutInjectionPlots:
         roles_present = [r for r in ROLE_COLORS if (tos["timeout_role"] == r).any()]
 
         fig, axes = UKS_MPL.subplots(1, len(periods), width_per=width_per, height_per=height_per, sharex=True)
-        axes = list(np.atleast_1d(axes).ravel())
         bins = np.arange(0, 720 + width, width)
         for ax, per in zip(axes, periods):
             sub = tos[tos["period"] == per]
             stacks = [sub.loc[sub["timeout_role"] == r, "seconds_remaining"].to_numpy() for r in roles_present]
             colors = [ROLE_COLORS[r] for r in roles_present]
             labels = [f"{r} (n={len(s):,})" for r, s in zip(roles_present, stacks)]
-            ax.hist(stacks, bins=bins, stacked=True, color=colors, label=labels, edgecolor="white", linewidth=0.3)
+            ax.hist(stacks, bins=bins, stacked=True, color=colors, label=labels, edgecolor="white", linewidth=0.3)  # type: ignore
             for x, lbl, c in POST_2017_TRIGGERS:
                 ax.axvline(x, color=c, linestyle="--", linewidth=1)
             ax.set_title(f"Period {per}  (n={len(sub):,})")
@@ -233,6 +231,7 @@ class TimeoutInjectionPlots:
         max_sec: int = 300,
         height_per: float = 4,
         width_per: float = 14,
+        duration_col: str = "timeout_duration_s",
         exclude_next_action_types: tuple[str, ...] = ("substitution", "stoppage", "instantreplay"),
     ):
         """Stacked histogram of wall-clock duration (seconds to next event)
@@ -241,29 +240,32 @@ class TimeoutInjectionPlots:
         Validates the intuition that mandatory TOs run longer (≈150-200s
         for TV breaks) than regular coach TOs (≈60-120s).
 
-        IMPORTANT: cdnnba logs substitutions (and instant-replay rows) at
-        the START of the TV break — before actual game resumption. If you
-        naively diff timeouts to the literal next pbp row, you get a
-        spurious 0-10s spike of "fast mandatories" that are really just
-        followed by a sub. By default we **exclude** ``substitution`` /
-        ``stoppage`` / ``instantreplay`` from "next event" computation,
-        so deltas reflect time to actual game resumption. Pass
-        ``exclude_next_action_types=()`` to disable.
+        **Duration source** (resolved in this order):
+            1. ``classified_cdnnba[duration_col]`` — the
+               ``CDNNBAMemoPL.timeout_duration_s`` ``@memo_series`` flowed
+               in via ``_prep_cdnnba``. Preferred — pre-computed once,
+               correctly excludes subs/stoppages/instantreplay.
+            2. ``full_pbp_pl`` with a ``timeActual`` column — fall back to
+               on-the-fly computation (uses ``exclude_next_action_types``).
+            3. Else: TO-to-TO delta only (coarse).
 
-        ``full_pbp_pl``: full play-by-play (needed for timeActual + correct
-        "next event" lookup). Required for this plot to be meaningful;
-        without it, falls back to TO-to-TO deltas which are too coarse.
+        ``exclude_next_action_types``: applies only on the on-the-fly path.
         """
-        if full_pbp_pl is not None and "timeActual" in full_pbp_pl.columns:
+        cls = classified_cdnnba.to_pandas()
+        tos = cls[cls["actionType"].astype(str).str.strip().str.lower() == "timeout"].copy()
+
+        if duration_col in tos.columns:
+            tos["_delta"] = tos[duration_col]
+        elif full_pbp_pl is not None and "timeActual" in full_pbp_pl.columns:
             df = full_pbp_pl.to_pandas().sort_values(["gameId", "orderNumber"]).reset_index(drop=True)
             if exclude_next_action_types:
                 excl_set = set(exclude_next_action_types)
                 df = df[~df["actionType"].astype(str).str.strip().isin(excl_set)].copy()
             df["_t"] = pd.to_datetime(df["timeActual"], utc=True, errors="coerce")
             df["_delta"] = df.groupby("gameId")["_t"].diff(-1).dt.total_seconds().mul(-1)
-            cls = classified_cdnnba.to_pandas()
-            tos = cls.merge(df[["gameId", "orderNumber", "_delta"]], on=["gameId", "orderNumber"], how="left")
-            tos = tos[tos["actionType"].astype(str).str.strip().str.lower() == "timeout"]
+            tos = tos.drop(columns=[c for c in ("_delta",) if c in tos.columns]).merge(
+                df[["gameId", "orderNumber", "_delta"]], on=["gameId", "orderNumber"], how="left"
+            )
         else:
             tos = TimeoutInjectionPlots._classified_timeouts_pd(classified_cdnnba)
             tos["_delta"] = tos.get("_wallclock_delta")
@@ -313,7 +315,6 @@ class TimeoutInjectionPlots:
         tos = TimeoutInjectionPlots._classified_timeouts_pd(classified_cdnnba, action=action)
 
         fig, axes = UKS_MPL.subplots(1, 2, width_per=width_per, height_per=height_per)
-        axes = list(np.atleast_1d(axes).ravel())
 
         # Panel 1: stacked bar of role counts by period
         roles_present = [r for r in ROLE_COLORS if (tos["timeout_role"] == r).any()]
@@ -327,7 +328,7 @@ class TimeoutInjectionPlots:
         x = np.arange(len(per_period))
         for r in roles_present:
             vals = per_period[r].values
-            axes[0].bar(x, vals, bottom=bottoms, label=r, color=ROLE_COLORS[r], edgecolor="white", linewidth=0.5)
+            axes[0].bar(x, vals, bottom=bottoms, label=r, color=ROLE_COLORS[r], edgecolor="white", linewidth=0.5)  # type: ignore
             bottoms = bottoms + vals  # type: ignore
         axes[0].set_xticks(x)
         axes[0].set_xticklabels([f"P{p}" for p in per_period.index])
@@ -345,7 +346,7 @@ class TimeoutInjectionPlots:
         zero_count = len(set(all_gp) - set(per_gp.index))
         if zero_count:
             counts = pd.Series({0: zero_count, **counts.to_dict()}).sort_index()
-        axes[1].bar(counts.index.astype(int), counts.values, color="tab:green", edgecolor="white", linewidth=0.5)
+        axes[1].bar(counts.index.astype(int), counts.values, color="tab:green", edgecolor="white", linewidth=0.5)  # type: ignore
         axes[1].set_xlabel("# predicted mandatories per (game, period)")
         axes[1].set_ylabel("count of (game, period) buckets")
         axes[1].set_title("Mandatory-per-period distribution")
