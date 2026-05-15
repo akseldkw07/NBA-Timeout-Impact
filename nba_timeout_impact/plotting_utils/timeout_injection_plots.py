@@ -193,33 +193,62 @@ class TimeoutInjectionPlots:
         periods: tuple[int, ...] = (1, 2, 3, 4),
         height_per: float = 3,
         width_per: float = 14,
+        causes: tuple[str, ...] | None = None,
+        combine_periods: bool = False,
     ):
         """Histogram of predicted ``timeout_role`` distribution vs
-        ``seconds_remaining``. One row per period.
+        ``seconds_remaining``.
 
         Use this to spot whether the classifier's predicted mandatories
         cluster at the rulebook trigger marks (6:59 / 2:59) the way the
         empirical data should, and whether ``discretionary`` predictions
         sit where they should (clutch time, pre-trigger).
+
+        ``causes``: optional iterable of ``timeout_cause`` values to keep
+        (``"tv_mandatory"``, ``"coach_absorb"``, ``"coach_discretionary"``,
+        ``"challenge"``). If ``None`` (default), include everything.
+        Use ``causes=("tv_mandatory",)`` to see only the league-forced
+        commercial-break events used in causal analysis.
+
+        ``combine_periods``: if True, render a single panel aggregating all
+        ``periods`` together. Default False = one panel per period.
         """
         tos = TimeoutInjectionPlots._classified_timeouts_pd(classified_cdnnba, action=action)
         tos = tos[tos["period"].isin(list(periods))].copy()
+        if causes is not None:
+            if "timeout_cause" not in tos.columns:
+                raise ValueError(
+                    "causes filter requires `timeout_cause` column — re-run "
+                    "TVTimeoutValidation.classify_timeouts to generate it."
+                )
+            tos = tos[tos["timeout_cause"].isin(list(causes))].copy()
         roles_present = [r for r in ROLE_COLORS if (tos["timeout_role"] == r).any()]
 
-        fig, axes = UKS_MPL.subplots(1, len(periods), width_per=width_per, height_per=height_per, sharex=True)
         bins = np.arange(0, 720 + width, width)
-        for ax, per in zip(axes, periods):
-            sub = tos[tos["period"] == per]
+        cause_suffix = f"  [causes={','.join(causes)}]" if causes is not None else ""
+
+        if combine_periods:
+            fig, axes = UKS_MPL.subplots(1, 1, width_per=width_per, height_per=height_per)
+            panel_iter: list[tuple] = [(axes, None)]
+        else:
+            fig, axes = UKS_MPL.subplots(1, len(periods), width_per=width_per, height_per=height_per, sharex=True)
+            panel_iter = list(zip(axes, periods))
+
+        for ax, per in panel_iter:
+            sub = tos if per is None else tos[tos["period"] == per]
             stacks = [sub.loc[sub["timeout_role"] == r, "seconds_remaining"].to_numpy() for r in roles_present]
             colors = [ROLE_COLORS[r] for r in roles_present]
             labels = [f"{r} (n={len(s):,})" for r, s in zip(roles_present, stacks)]
             ax.hist(stacks, bins=bins, stacked=True, color=colors, label=labels, edgecolor="white", linewidth=0.3)  # type: ignore
             for x, lbl, c in POST_2017_TRIGGERS:
                 ax.axvline(x, color=c, linestyle="--", linewidth=1)
-            ax.set_title(f"Period {per}  (n={len(sub):,})")
+            period_label = f"Q{'/'.join(map(str, periods))}" if per is None else f"Period {per}"
+            ax.set_title(f"{period_label}  (n={len(sub):,}){cause_suffix}")
             ax.set_ylabel(f"count (bin = {width}s)")
             ax.legend(loc="upper left", fontsize=7)
-        axes[-1].set_xlabel("seconds remaining in period (bin floor)")
+
+        last_ax = axes if combine_periods else axes[-1]
+        last_ax.set_xlabel("seconds remaining in period (bin floor)")
         return fig, axes
 
     @staticmethod

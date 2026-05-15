@@ -81,6 +81,21 @@ POST_2017_SLOTS = [
 
 
 # --------------------------------------------------------------------------- #
+#  Cause-classification thresholds (cdnnba only — v3 uses subType directly)   #
+# --------------------------------------------------------------------------- #
+
+# How far below a trigger a mandatory must sit to count as a "true TV break"
+# auto-fire vs a coach-absorb far from the trigger. The first dead ball after
+# a trigger expires is usually within ~30s; we use 60s as a generous window.
+TV_BREAK_SR_BUFFER_S = 60
+
+# Wall-clock duration threshold (seconds). Per NBA rule 5, mandatory TV breaks
+# run 2:45 local / 3:15 national. Anything below ~150s is almost certainly a
+# coach-absorbed mandatory slot where no real TV break was taken.
+TV_BREAK_DURATION_MIN_S = 150
+
+
+# --------------------------------------------------------------------------- #
 #  Result type                                                                #
 # --------------------------------------------------------------------------- #
 
@@ -186,6 +201,50 @@ class TVTimeoutValidation:
             for K in range(1, len(triggers) + 1):
                 mask = is_mandatory & in_periods & (slot == K)
                 df_pd.loc[mask, "timeout_role"] = f"slot_{K}_mandatory"
+
+        # ------------------------------------------------------------------ #
+        #  timeout_cause — what *caused* the row, for downstream causal use  #
+        # ------------------------------------------------------------------ #
+        # Categories:
+        #   ""                  — non-timeout
+        #   "challenge"         — coach challenge
+        #   "coach_discretionary" — coach TO that didn't fill a mandatory slot
+        #   "tv_mandatory"      — league-forced TV commercial break (EXOGENOUS)
+        #   "coach_absorb"      — coach TO that absorbed a mandatory slot but
+        #                         doesn't look like a real TV break
+        #
+        # For causal analysis, filter to ``timeout_cause == "tv_mandatory"``.
+        df_pd["timeout_cause"] = ""
+        df_pd.loc[is_challenge, "timeout_cause"] = "challenge"
+        df_pd.loc[is_full_to & ~is_mandatory, "timeout_cause"] = "coach_discretionary"
+
+        if source == "v3":
+            # v3 directly labels Officials with personId == 0; no need for
+            # position/duration heuristics. Every mandatory row IS a TV break.
+            df_pd.loc[is_full_to & is_mandatory, "timeout_cause"] = "tv_mandatory"
+        else:
+            # cdnnba: ``qualifiers`` merges auto-fires with coach-absorbed
+            # mandatories. Distinguish by:
+            #   (a) sr just below a rulebook trigger (the first dead ball
+            #       after the trigger expires), AND
+            #   (b) wall-clock duration ≥ TV_BREAK_DURATION_MIN_S
+            near_trigger = pd.Series(False, index=df_pd.index)
+            for periods_ok, triggers in slot_table:
+                in_periods = df_pd["period"].isin(periods_ok)
+                for t in triggers:
+                    near_trigger |= in_periods & (sr <= t) & (sr >= t - TV_BREAK_SR_BUFFER_S)
+
+            if "timeout_duration_s" in df_pd.columns:
+                long_enough = df_pd["timeout_duration_s"].fillna(0) >= TV_BREAK_DURATION_MIN_S
+            else:
+                # No duration info available — fall back to position-only check.
+                # The user can re-prep with timeout_duration_s for stricter filtering.
+                long_enough = pd.Series(True, index=df_pd.index)
+
+            is_tv = is_full_to & is_mandatory & near_trigger & long_enough
+            is_absorb = is_full_to & is_mandatory & ~is_tv
+            df_pd.loc[is_tv, "timeout_cause"] = "tv_mandatory"
+            df_pd.loc[is_absorb, "timeout_cause"] = "coach_absorb"
 
         return pl.from_pandas(df_pd)
 
