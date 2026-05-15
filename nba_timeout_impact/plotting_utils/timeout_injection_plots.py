@@ -61,7 +61,6 @@ class TimeoutInjectionPlots:
         pred = tos.filter(pl.col("timeout_role").str.contains("_mandatory"))["seconds_remaining"].to_numpy()
 
         fig, axes = UKS_MPL.subplots(1, len(widths), width_per=width_per, height_per=height_per, sharex=True)
-        axes = list(np.atleast_1d(axes).ravel())
         for i, (ax, width) in enumerate(zip(axes, widths)):
             bins = np.arange(0, 720 + width, width)
             ax.hist(gt, bins=bins, alpha=0.6, color="C0", label=f"v3 Official / Official TV (n={len(gt):,})")  # type: ignore[arg-type]
@@ -77,9 +76,10 @@ class TimeoutInjectionPlots:
             if i == len(axes) - 1:
                 ax.set_xlabel("seconds remaining in period (bin floor)")
 
+        match_title = "row-by-row match" if r_v3.tolerance_s == 0 else f"fuzzy clock match (tol={r_v3.tolerance_s}s)"
         _annotate_metrics_box(
             axes[0],
-            title=f"per-event greedy match (tol={r_v3.tolerance_s}s)",
+            title=match_title,
             tp=r_v3.tp,
             fp=r_v3.fp,
             fn=r_v3.fn,
