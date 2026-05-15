@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 from kret_matplotlib.UTILS_Matplotlib import UTILS_Plotting as UKS_MPL
 
-from nba_timeout_impact.analyses.tv_timeout_validation import ValidationResult
+from nba_timeout_impact.data_pipes.tv_timeout_injection import ValidationResult
 
 # Pre-2017 trigger marks (Q2 / Q4): 8:59, 5:59, 2:59 → sr boundaries 540 / 360 / 180.
 PRE_2017_TRIGGERS = [

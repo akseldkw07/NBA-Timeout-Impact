@@ -18,7 +18,8 @@ Public API:
   classifier against v3 ground truth subTypes on the labeled era.
 - ``TVTimeoutValidation.per_period_existence_score(...)``: looser per-period
   presence metric.
-- ``TVTimeoutValidation.compare_configs(...)``: sweep multiple configs.
+- ``TVTimeoutValidation.confusion_matrix_v3(...)``: per-class confusion
+  table.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-import typing as t
 import pandas as pd
 import polars as pl
 
@@ -56,119 +56,15 @@ SOURCE_CONFIGS: dict[str, dict] = {
 # -------------------- era-specific rulebook windows ---------------------- #
 
 
-# Each entry: (absorb_low, absorb_high). A TO with sr in (low, high] absorbs
-# the slot; a TO with sr <= low fires the mandatory.
-# Pre-2017: Q2 & Q4 only, three cascading marks at 8:59 / 5:59 / 2:59.
-# Post-2017: Q1-Q4, two independent marks at 6:59 / 2:59.
-
-PRE_2017_CASCADING = {
-    "slots": [(540, 720), (360, 540), (180, 360)],
-    "periods": [2, 4],
-    "cascading": True,
-}
-PRE_2017_INDEPENDENT = {
-    "slots": [(540, 720), (360, 540), (180, 360)],
-    "periods": [2, 4],
-    "cascading": False,
-}
-POST_2017 = {
-    "slots": [(420, 720), (180, 420)],
-    "periods": [1, 2, 3, 4],
-    "cascading": False,
-}
+# Trigger marks in seconds-remaining. Pre-2017: Q2/Q4 only, three triggers
+# at 8:59 / 5:59 / 2:59. Post-2017: Q1-Q4, two triggers at 6:59 / 2:59.
+PRE_2017_TRIGGERS = [540, 360, 180]
+PRE_2017_PERIODS = [2, 4]
+POST_2017_TRIGGERS = [420, 180]
+POST_2017_PERIODS = [1, 2, 3, 4]
 
 
-def _detect_era(season: int | None, pre_2017_mode: str = "independent") -> dict:
-    """Return rulebook params keyed by season (start year). 2017-18 is the cutoff.
-
-    ``pre_2017_mode``: ``"independent"`` (default) or ``"cascading"``. Empirically
-    pre-2017 looks closer to independent firing per the Q2/Q4 Official-count
-    distribution (~1.55 per quarter, not ~1.0).
-    """
-    if season is None or season >= 2017:
-        return POST_2017
-    return PRE_2017_INDEPENDENT if pre_2017_mode == "independent" else PRE_2017_CASCADING
-
-
-# -------------------- core classification logic -------------------------- #
-
-
-def _classify_one_period(
-    tos: list[dict],
-    rules: dict,
-    challenge_subtypes: set[str],
-    mandatory_tolerance_s: int = 60,
-) -> list[str]:
-    """Row-by-row stateful classification of timeouts in one (gameId, period).
-
-    Walks ``tos`` in event order. Each TO claims **at most one** slot based on
-    its ``seconds_remaining`` (sr) position relative to the rulebook windows;
-    once a slot is claimed (absorbed / fired / missed / blocked) it never
-    accepts another TO. Decisions on prior rows carry forward via
-    ``slot_state``.
-
-    Slot windows:
-        - **Absorb window** for slot K: ``sr in (absorb_low, absorb_high]``
-        - **Mandatory-firing window** for slot K:
-          ``sr in [absorb_low - mandatory_tolerance_s, absorb_low]`` — i.e. a
-          TO at or just after the trigger fires the slot's mandatory.
-        - If sr is far below ``absorb_low`` (more than the tolerance), slot K
-          is marked **missed** (the rulebook fired but we didn't see a row).
-
-    ``mandatory_tolerance_s``: how far below a trigger a TO can sit and still
-    be considered the mandatory firing. Defaults to 60 s — Officials in v3
-    usually sit within a few seconds of the trigger, but real stoppages can
-    drift on long plays.
-    """
-    n = len(tos)
-    labels = ["discretionary"] * n
-    slots = rules["slots"]
-    cascading = rules["cascading"]
-    n_slots = len(slots)
-
-    # slot_state[K]: None=open; "absorbed", "fired", "missed", "blocked" once claimed
-    slot_state: list[str | None] = [None] * n_slots
-
-    for i, to in enumerate(tos):
-        if to["subType"] in challenge_subtypes:
-            labels[i] = "challenge"
-            continue
-        sr = to["sr"]
-        if sr is None:
-            continue  # leave as discretionary
-
-        # Walk slots in order, advancing past any already claimed.
-        # For the first open slot whose window covers sr (absorb or mandatory
-        # firing), claim it. If sr is below that slot's mandatory tolerance,
-        # the slot was missed — mark it and try the next slot.
-        K = 0
-        while K < n_slots:
-            if slot_state[K] is not None:
-                K += 1
-                continue
-            absorb_low, absorb_high = slots[K]
-            if sr > absorb_high:
-                break  # TO occurs before this slot's window (unexpected in event order)
-            if absorb_low < sr <= absorb_high:
-                slot_state[K] = "absorbed"
-                labels[i] = f"slot_{K + 1}_absorbed"
-                break
-            if absorb_low - mandatory_tolerance_s <= sr <= absorb_low:
-                slot_state[K] = "fired"
-                labels[i] = f"slot_{K + 1}_mandatory"
-                if cascading:
-                    for L in range(K + 1, n_slots):
-                        if slot_state[L] is None:
-                            slot_state[L] = "blocked"
-                break
-            # sr is far below this slot's trigger → slot was missed; advance
-            slot_state[K] = "missed"
-            K += 1
-
-    return labels
-
-
-# -------------------- public class --------------------------------------- #
+# -------------------- public result type --------------------------------- #
 
 
 @dataclass
@@ -212,7 +108,7 @@ class ValidationResult:
 class TVTimeoutValidation:
     """Static-method container for mandatory-timeout reclassification + validation."""
 
-    # ---------- era / source dispatch ----------
+    # ---------- source dispatch ----------
 
     @staticmethod
     def get_source_config(source: Literal["v3", "cdnnba"]) -> dict:
@@ -220,140 +116,141 @@ class TVTimeoutValidation:
             raise ValueError(f"unknown source {source!r}, expected one of {list(SOURCE_CONFIGS)}")
         return SOURCE_CONFIGS[source]
 
-    @staticmethod
-    def detect_era(season: int | None) -> dict:
-        return _detect_era(season)
-
     # ---------- classification ----------
 
     @staticmethod
     def classify_timeouts(
         df: pl.DataFrame | pd.DataFrame,
-        source: t.Literal["v3", "cdnnba"],
-        seasons: tuple[int, int] | None = None,
-    ):
-        cfg = TVTimeoutValidation.get_source_config(source)
-        timeout_action = cfg["timeout_action"]
-        challenge_subs = set(cfg["challenge_subtypes"])
-        order_col = cfg["order_col"]
-
-        df_pd = df.to_pandas() if isinstance(df, pl.DataFrame) else df
-
-        if seasons is not None and "season" in df_pd.columns:
-            lo, hi = seasons
-            # The fix for your specific code
-            df_pd = df_pd[df_pd["season"].between(lo, hi)]
-
-        df_pd["f_isTimeout"] = df_pd["actionType"].str.strip() == timeout_action
-        df_pd["f_timeLT_6_59"] = df_pd["seconds_remaining"] < 6 * 60 + 59
-        df_pd["f_timeLT_2_59"] = df_pd["seconds_remaining"] < 2 * 60 + 59
-
-        df_pd["actionType"] = df_pd["actionType"].str.strip()
-        df_pd["subType"] = df_pd["subType"].str.strip()
-
-        # Create a list of tuples, then convert to categorical
-        df_pd["GamePeriodCat"] = pd.Categorical(list(zip(df_pd["gameId"], df_pd["period"])), ordered=True)
-        df_pd["cumTimeoutsInPeriod"] = df_pd.groupby("GamePeriodCat", observed=True)["f_isTimeout"].cumsum()
-        # Check if it's a timeout, if it's the first one (cum == 1), and if it hits the time flag
-        # 1. Define the specific conditions
-        cond_6_59 = df_pd["f_isTimeout"] & df_pd["f_timeLT_6_59"]
-        cond_2_59 = df_pd["f_isTimeout"] & df_pd["f_timeLT_2_59"]
-
-        # 2. Use groupby + cumsum to flag only the first occurrence per group
-        # We check where cumsum == 1 AND the condition itself is True
-        df_pd["f_firstTimeoutLT_6_59"] = (
-            cond_6_59.groupby(df_pd["GamePeriodCat"], observed=True).cumsum() == 1
-        ) & cond_6_59
-        df_pd["f_firstTimeoutLT_2_59"] = (
-            cond_2_59.groupby(df_pd["GamePeriodCat"], observed=True).cumsum() == 1
-        ) & cond_2_59
-
-        df_pd["MandatoryTimeout"] = (df_pd["f_firstTimeoutLT_6_59"] & df_pd["cumTimeoutsInPeriod"] == 1) | (
-            df_pd["f_firstTimeoutLT_2_59"] & df_pd["cumTimeoutsInPeriod"] == 2
-        )
-
-        return df_pd, timeout_action, challenge_subs, order_col
-
-    @staticmethod
-    def classify_timeouts2(
-        df: pl.DataFrame | pd.DataFrame,
         source: Literal["v3", "cdnnba"],
         pre_2017_mode: Literal["independent", "cascading"] = "independent",
         seasons: tuple[int, int] | None = None,
         mandatory_tolerance_s: int = 60,
+        mandatory_above_tolerance_s: int = 0,
     ) -> pl.DataFrame:
-        """Add a ``timeout_role`` column to every TIMEOUT row in ``df``.
+        """Vectorized labeler — adds a ``timeout_role`` column to every row.
 
-        ``timeout_role`` values:
-        - ``slot_K_mandatory``: auto-charged mandatory firing at slot K
-        - ``slot_K_absorbed``: voluntary coach TO that absorbed slot K's mandatory
-        - ``discretionary``: coach TO with no mandatory role
-        - ``challenge``: coach's challenge
-        - ``""`` (empty): non-timeout rows
+        For each TIMEOUT row, sets one of:
+        - ``slot_K_mandatory``: official auto-fired the slot K mandatory
+          (sr ≤ trigger_K, within ``mandatory_tolerance_s`` below it).
+        - ``slot_K_absorbed``: coach TO in slot K's pre-trigger absorb
+          window (sr > trigger_K, sr ≤ upper_K).
+        - ``challenge``: coach challenge subtype.
+        - ``discretionary``: coach TO with no mandatory role.
+        Non-TIMEOUT rows get ``""``.
 
-        Era is auto-dispatched per game by ``season`` (≤2016 → pre-2017
-        cascading Q2/Q4; ≥2017 → post-2017 independent Q1-Q4). Result is a
-        polars DataFrame with the same rows as input plus the new column.
+        Era is auto-dispatched per row by ``season``:
+        - ``season < 2017``: pre-2017 — Q2/Q4 only, triggers
+          ``[540, 360, 180]`` (8:59 / 5:59 / 2:59). ``pre_2017_mode=
+          "cascading"`` blocks later slots once any earlier slot fires.
+        - ``season >= 2017``: post-2017 — Q1-Q4, triggers ``[420, 180]``
+          (6:59 / 2:59). Always independent.
 
-        ``seasons``: optional ``(lo, hi)`` inclusive filter on ``season``
-        before classification. Useful for restricting to a sub-era (e.g.
-        ``(2013, 2016)`` for late-pre-2017 only).
+        Within each (gameId, period), the *first* coach TO in slot K's
+        claim window (sr ∈ (trigger_K - mand_tol, upper_K]) claims the
+        slot — later TOs in the same region stay discretionary. Slots
+        K=1..N are resolved in order, so the slot-K-vs-slot-K+1 overlap
+        zone (size ``mand_tol``) gives priority to the earlier trigger.
         """
         cfg = TVTimeoutValidation.get_source_config(source)
         timeout_action = cfg["timeout_action"]
         challenge_subs = set(cfg["challenge_subtypes"])
         order_col = cfg["order_col"]
 
-        df_pl = pl.from_pandas(df) if isinstance(df, pd.DataFrame) else df
-
-        if seasons is not None and "season" in df_pl.columns:
+        df_pd = df.to_pandas() if isinstance(df, pl.DataFrame) else df.copy()
+        if seasons is not None and "season" in df_pd.columns:
             lo, hi = seasons
-            df_pl = df_pl.filter((pl.col("season") >= lo) & (pl.col("season") <= hi))
+            df_pd = df_pd[df_pd["season"].between(lo, hi)].copy()
 
-        # Strip strings (raw parquets sometimes have trailing whitespace)
-        df_pl = df_pl.with_columns(
-            pl.col("actionType").cast(pl.String).str.strip_chars().alias("_at"),
-            pl.col("subType").cast(pl.String).str.strip_chars().alias("_st"),
+        # Sort by event order within each game so cumsum-based "first per
+        # (gameId, period)" semantics line up with the play-by-play.
+        df_pd = df_pd.sort_values(["gameId", order_col]).reset_index(drop=True)
+        df_pd["actionType"] = df_pd["actionType"].astype(str).str.strip()
+        df_pd["subType"] = df_pd["subType"].astype(str).str.strip()
+
+        df_pd["timeout_role"] = ""
+        is_timeout = df_pd["actionType"] == timeout_action
+        is_challenge = is_timeout & df_pd["subType"].isin(challenge_subs)
+        is_coach_to = is_timeout & ~is_challenge
+        df_pd.loc[is_challenge, "timeout_role"] = "challenge"
+        df_pd.loc[is_coach_to, "timeout_role"] = "discretionary"
+
+        if "season" in df_pd.columns:
+            pre_mask = (df_pd["season"] < 2017).fillna(False).astype(bool)
+        else:
+            pre_mask = pd.Series(False, index=df_pd.index)
+
+        TVTimeoutValidation._apply_slot_labels(
+            df_pd,
+            eligible=pre_mask & is_coach_to,
+            triggers=PRE_2017_TRIGGERS,
+            periods_ok=PRE_2017_PERIODS,
+            mand_tol=mandatory_tolerance_s,
+            mand_tol_above=mandatory_above_tolerance_s,
+            cascading=(pre_2017_mode == "cascading"),
         )
-        # Classify EVERY timeout row — do not use subType to decide whether to
-        # process it. (We treat all timeouts equally for the rulebook walk and
-        # only consult subType for the special challenge case, which is
-        # structurally distinct from mandatory absorption.)
-        is_timeout = pl.col("_at") == timeout_action
-
-        to_rows = (
-            df_pl.with_row_index("_row")
-            .filter(is_timeout)
-            .select("_row", "gameId", "period", "season", "seconds_remaining", "_st", order_col)
-            .sort("gameId", order_col)
+        TVTimeoutValidation._apply_slot_labels(
+            df_pd,
+            eligible=(~pre_mask) & is_coach_to,
+            triggers=POST_2017_TRIGGERS,
+            periods_ok=POST_2017_PERIODS,
+            mand_tol=mandatory_tolerance_s,
+            mand_tol_above=mandatory_above_tolerance_s,
+            cascading=False,
         )
 
-        # Group by (gameId, period) and classify
-        out_rows: list[tuple[int, str]] = []
-        for (game_id, period), group in to_rows.group_by(["gameId", "period"], maintain_order=True):
-            season_val = group["season"][0] if "season" in group.columns else None
-            rules = _detect_era(int(season_val) if season_val is not None else None, pre_2017_mode=pre_2017_mode)
-            if period not in rules["periods"]:
-                for row_id in group["_row"].to_list():
-                    out_rows.append((row_id, "discretionary"))
-                continue
-            tos = [
-                {"sr": sr, "subType": st}
-                for sr, st in zip(group["seconds_remaining"].to_list(), group["_st"].to_list())
-            ]
-            labels = _classify_one_period(tos, rules, challenge_subs, mandatory_tolerance_s=mandatory_tolerance_s)
-            for row_id, label in zip(group["_row"].to_list(), labels):
-                out_rows.append((row_id, label))
+        return pl.from_pandas(df_pd)
 
-        # Build label series, default empty string for non-timeouts
-        label_df = pl.DataFrame(out_rows, schema={"_row": pl.UInt32, "timeout_role": pl.String}, orient="row")
-        result = (
-            df_pl.with_row_index("_row")
-            .join(label_df, on="_row", how="left")
-            .with_columns(pl.col("timeout_role").fill_null(""))
-            .drop("_row", "_at", "_st")
-        )
-        return result
+    @staticmethod
+    def _apply_slot_labels(
+        df_pd: pd.DataFrame,
+        *,
+        eligible: pd.Series,
+        triggers: list[int],
+        periods_ok: list[int],
+        mand_tol: int,
+        mand_tol_above: int = 0,
+        cascading: bool,
+    ) -> None:
+        """In-place: claim slots K=1..N sequentially.
+
+        For each K, the first eligible coach TO per (gameId, period) whose
+        ``seconds_remaining`` lands in ``(trigger_K - mand_tol, upper_K]``
+        (where ``upper_K`` = previous trigger, or 720 for slot 1) claims
+        the slot. Label is ``slot_K_mandatory`` if sr ∈ [trigger_K -
+        mand_tol, trigger_K + mand_tol_above], else ``slot_K_absorbed``.
+
+        Slot windows overlap by ``mand_tol`` between consecutive slots; the
+        sequential iteration + ``claimed`` mask gives slot K priority in
+        the overlap zone (the rulebook fires the earlier trigger first).
+        Cascading mode additionally blocks all later slots in any
+        (gameId, period) where slot K fired (mandatory).
+        """
+        sr = df_pd["seconds_remaining"]
+        in_period = df_pd["period"].isin(periods_ok)
+        claimed = pd.Series(False, index=df_pd.index)
+        blocked = pd.Series(False, index=df_pd.index)
+        group_keys = [df_pd["gameId"], df_pd["period"]]
+
+        for K, trigger in enumerate(triggers, start=1):
+            upper = triggers[K - 2] if K >= 2 else 720
+            lower = trigger - mand_tol
+            mand_upper = trigger + mand_tol_above
+
+            slot_eligible = eligible & in_period & (sr > lower) & (sr <= upper) & ~claimed & ~blocked
+            cum = slot_eligible.astype(int).groupby(group_keys).cumsum()
+            is_first = (cum == 1) & slot_eligible
+
+            is_mand = is_first & (sr <= mand_upper)
+            is_absorb = is_first & (sr > mand_upper)
+
+            df_pd.loc[is_absorb, "timeout_role"] = f"slot_{K}_absorbed"
+            df_pd.loc[is_mand, "timeout_role"] = f"slot_{K}_mandatory"
+
+            claimed = claimed | is_first
+
+            if cascading:
+                fired_per_group = is_mand.astype(int).groupby(group_keys).transform("max").astype(bool)
+                blocked = blocked | fired_per_group
 
     # ---------- validation against v3 ground truth ----------
 
@@ -462,6 +359,7 @@ class TVTimeoutValidation:
         pre_2017_mode: Literal["independent", "cascading"] = "independent",
         match_mode: Literal["row", "fuzzy"] = "row",
         mandatory_tolerance_s: int = 60,
+        mandatory_above_tolerance_s: int = 0,
     ) -> ValidationResult:
         """Score ``classify_timeouts`` predictions against v3 ground-truth
         ``Official`` / ``Official TV`` subType labels.
@@ -474,15 +372,17 @@ class TVTimeoutValidation:
             - ``"fuzzy"``: legacy greedy clock matching within ``tolerance_s``
               seconds. Useful as a loosened-grading fallback.
 
-        ``mandatory_tolerance_s`` is forwarded to the classifier (controls how
-        far below a slot's trigger a TO is still tagged as mandatory firing).
+        ``mandatory_tolerance_s`` is forwarded to the classifier (controls
+        how far below a slot's trigger a TO is still tagged as mandatory
+        firing).
         """
         v3_pl = TVTimeoutValidation._prep_v3(memo, seasons)
-        classified = TVTimeoutValidation.classify_timeouts2(
+        classified = TVTimeoutValidation.classify_timeouts(
             v3_pl,
             source="v3",
             pre_2017_mode=pre_2017_mode,
             mandatory_tolerance_s=mandatory_tolerance_s,
+            mandatory_above_tolerance_s=mandatory_above_tolerance_s,
         )
 
         if match_mode == "row":
@@ -572,7 +472,7 @@ class TVTimeoutValidation:
         """Looser metric: did we predict ≥1 mandatory in this (gameId, period)
         iff v3 has ≥1 Official label?"""
         v3_pl = TVTimeoutValidation._prep_v3(memo, seasons)
-        classified = TVTimeoutValidation.classify_timeouts2(
+        classified = TVTimeoutValidation.classify_timeouts(
             v3_pl, source="v3", pre_2017_mode=pre_2017_mode, mandatory_tolerance_s=mandatory_tolerance_s
         )
         pred_keys = (
@@ -617,7 +517,7 @@ class TVTimeoutValidation:
         agrees with / diverges from v3's explicit labels.
         """
         v3_pl = TVTimeoutValidation._prep_v3(memo, seasons)
-        classified = TVTimeoutValidation.classify_timeouts2(
+        classified = TVTimeoutValidation.classify_timeouts(
             v3_pl, source="v3", pre_2017_mode=pre_2017_mode, mandatory_tolerance_s=mandatory_tolerance_s
         )
         tos = (
@@ -632,7 +532,7 @@ class TVTimeoutValidation:
 
 
 # Module-level conveniences (preserve previous import patterns)
-classify_timeouts = TVTimeoutValidation.classify_timeouts2
+classify_timeouts = TVTimeoutValidation.classify_timeouts
 validate_against_v3 = TVTimeoutValidation.validate_against_v3
 per_period_existence_score = TVTimeoutValidation.per_period_existence_score
 confusion_matrix_v3 = TVTimeoutValidation.confusion_matrix_v3
