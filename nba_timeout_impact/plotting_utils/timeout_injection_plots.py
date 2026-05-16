@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import Literal
 
+from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
 from kret_matplotlib.UTILS_Matplotlib import UTILS_Plotting as UKS_MPL
-
+import typing as t
+from kret_np_pd.single_ret_ndarray import SingleReturnArray
 from nba_timeout_impact.data_pipes.tv_timeout_injection import ValidationResult
 
 # Pre-2017 trigger marks (Q2 / Q4): 8:59, 5:59, 2:59 → sr boundaries 540 / 360 / 180.
@@ -175,6 +177,52 @@ class TimeoutInjectionPlots:
     # ------------------------------------------------------------------ #
     #  cdnnba diagnostic plots                                           #
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def plot_timeout_vanilla(
+        cdnnba_df: pl.DataFrame,
+        *,
+        sr_widths: tuple[int, ...] = (15,),
+        periods: tuple[int, ...] = (1, 2, 3, 4),
+        subtypes: tuple[str, ...] = ("full", "challenge"),
+        width_per: float = 11,
+        height_per: float = 3,
+    ):
+        """cdnnba timeout density histograms split by ``subType``.
+
+        Renders one panel per entry in ``sr_widths`` so the same distribution
+        shows at increasing coarseness — the 15s panel reveals fine structure
+        (trigger spikes), the 60s panel smooths it. Raw-data exploration —
+        does not require ``classify_timeouts`` output.
+
+        ``subtypes``: cdnnba ``subType`` values to overlay; default plots
+        ``"full"`` (coach full timeouts) and ``"challenge"``.
+        """
+        tos = cdnnba_df.filter((pl.col("actionType") == "timeout") & pl.col("period").is_in(list(periods)))
+
+        subtype_colors = {"full": "C0", "challenge": "C1"}
+        period_label = f"Q{'/'.join(map(str, periods))}"
+
+        fig, axes = UKS_MPL.subplots(1, len(sr_widths), width_per=width_per, height_per=height_per, sharex=True)
+        # print(type(fig), type(axes), type(sr_widths), len(sr_widths))
+        axes = t.cast(SingleReturnArray[Axes], np.array([axes])) if isinstance(axes, Axes) else axes
+
+        for ax, width in list(zip(axes, sr_widths)):
+            bins = np.arange(0, 720 + width, width).tolist()
+            for sub in subtypes:
+                vals = tos.filter(pl.col("subType") == sub)["seconds_remaining"].to_numpy()
+                if len(vals) == 0:
+                    continue
+                ax.hist(vals, bins=bins, alpha=0.65, color=subtype_colors.get(sub), label=f"{sub} (n={len(vals):,})")
+            for x, lbl, c in POST_2017_TRIGGERS:
+                ax.axvline(x, color=c, linestyle="--", linewidth=1, label=lbl)
+            ax.set_ylabel(f"count (bin = {width}s)")
+            ax.set_title(f"cdnnba timeout density, {period_label}, sr_bin = {width}s")
+            ax.legend(loc="upper right", fontsize=8)
+
+        last_ax = axes if isinstance(axes, plt.Axes) else axes[-1]
+        last_ax.set_xlabel("seconds remaining in period (bin floor)")
+        return fig, axes
 
     @staticmethod
     def _classified_timeouts_pd(classified: pl.DataFrame, action: str = "timeout") -> pd.DataFrame:
