@@ -344,4 +344,4 @@ def sp_stats_ttest_1samp_zero(vals: np.ndarray) -> tuple[float, float]:
     from scipy import stats as sp_stats
 
     t_stat, p = sp_stats.ttest_1samp(vals, 0.0)
-    return float(t_stat), float(p)
+    return float(t_stat), float(p)  # type: ignore

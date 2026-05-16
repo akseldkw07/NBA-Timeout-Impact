@@ -78,6 +78,11 @@ class CDNNBADatasetPL(Enriched_DF_PL):
 
     # -- enriched columns --
     season_type: pl.Series  # String
+    timeout_role: pl.Series  # String — slot_K_mandatory / discretionary / challenge / ""
+    timeout_cause: (
+        pl.Series
+    )  # String — tv_mandatory / coach_preempt / coach_absorb / coach_discretionary / challenge / ""
+    timeout_duration_s: pl.Series  # Float64 — wall-clock seconds to game resumption; null on non-TO rows
     season: pl.Series  # Int64
     shot_value: pl.Series  # Int64
     points_scored: pl.Series  # Int64
@@ -115,421 +120,65 @@ class CDNNBADatasetPL(Enriched_DF_PL):
 
     @classmethod
     def load_from_parquet(cls, path: str | Path | None = None) -> "CDNNBADatasetPL":
+        """Load the enriched cdnnba parquet and inject the timeout
+        classification columns (``timeout_role``, ``timeout_cause``,
+        ``timeout_duration_s``).
+
+        Injection preserves row order — the classifier doesn't sort — so
+        the result is row-aligned with the raw parquet and the
+        ``CDNNBAMemoPL`` memo series.
+        """
         path = path or NBAConstants.NBA_DATA_DIR / "cdnnba_enriched.parquet"
         df = pl.read_parquet(path)
-        df = cls._inject_tv_timeouts(df)
+        df = cls._inject_timeout_columns(df)
         ret = cls(df)
         ret.validate_data()
         return ret
 
-    # ------------------------------------------------------------------ #
-    #  Inferred TV / official timeouts                                     #
-    # ------------------------------------------------------------------ #
-    #
-    # cdnnba only logs coach-called timeouts ("full", "challenge").
-    # NBA rules mandate TV timeouts at specific game-clock marks in each
-    # applicable period.  We provide two inference methods:
-    #
-    # 1. Heuristic (original): find large real-time gaps in timeActual
-    #    with no logged timeout. Requires wall-clock timestamps.
-    # 2. Rulebook: walk through period events and inject a mandatory
-    #    timeout at the first dead ball past each rulebook threshold,
-    #    skipping if a coach TO already occurred in that window.
-    #    Validated against 2013-2016 nbastatsv3 ground truth with
-    #    Rule v7: thresholds [540, 360, 180] in Q2/Q4 → F1 ~0.88-0.92.
-    #
-    # Injected rows have actionType="timeout", subType="official_inferred".
-
-    _TV_TIMEOUT_MIN_EXCESS_SEC = 90.0
-
-    # Rulebook params tuned for the cdnnba era (post-2017 NBA rules).
-    # Applied to ALL four quarters with 2 mandatory marks: 7:00 and 3:00 remaining.
-    _RULEBOOK_THRESHOLDS_POST2017 = [420, 180]
-    _RULEBOOK_PERIODS_POST2017 = [1, 2, 3, 4]
-    _CDNNBA_COACH_TO_SUBTYPES = ["full", "challenge"]
-    _CDNNBA_DEAD_BALL_ACTION_TYPES = {
-        "foul",
-        "freethrow",
-        "substitution",
-        "turnover",
-        "violation",
-        "jumpball",
-        "stoppage",
-        "timeout",
-        "ejection",
-    }
-
     @staticmethod
-    def _infer_tv_timeouts(df: pl.DataFrame) -> pl.DataFrame:
-        """Detect TV/official timeouts from real-time vs game-clock gaps.
+    def _inject_timeout_columns(df: pl.DataFrame) -> pl.DataFrame:
+        """Add ``timeout_role``, ``timeout_cause``, and ``timeout_duration_s``
+        to a raw cdnnba frame.
 
-        Returns a DataFrame of new rows (one per inferred timeout) with
-        the same schema as *df*, ready to be concatenated.
+        Uses ``TVTimeoutValidation.compute_timeout_duration_s`` for the
+        wall-clock duration (sanity-clamped to ``[0, 600]`` seconds; nulls
+        outside that range).
+
+        Preserves row order so the result is row-aligned with the input.
+        Raises if the classifier ever returns a different height than the
+        input — alignment is a hard contract.
         """
-        spine = df.select(
-            "gameId",
-            "game_date",
-            "period",
-            "game_seconds_elapsed",
-            "seconds_remaining",
-            "seconds_elapsed",
-            "timeActual",
-            "actionType",
-            "orderNumber",
-            "scoreHome",
-            "scoreAway",
-            "possession",
-            "IsPlayoff",
-            "periodType",
-            "season",
-            "season_type",
-            "personId",
-            "points_scored",
-            "score_margin",
-            "is_clutch",
-            "possession_id",
-        ).sort("gameId", "orderNumber")
+        # Local import to avoid a circular dependency at module load time.
+        from nba_timeout_impact.data_pipes.tv_timeout_injection import TVTimeoutValidation
 
-        # Assign moment_id: contiguous events at the same game clock
-        spine = spine.with_columns(
-            (
-                (pl.col("game_seconds_elapsed") != pl.col("game_seconds_elapsed").shift(1))
-                | (pl.col("gameId") != pl.col("gameId").shift(1))
+        duration = TVTimeoutValidation.compute_timeout_duration_s(df)
+        df = df.with_columns(duration.alias("timeout_duration_s"))
+        classified = TVTimeoutValidation.classify_timeouts(df, source="cdnnba")
+        if classified.height != df.height:
+            raise RuntimeError(
+                f"timeout classifier dropped rows ({classified.height} vs {df.height}) "
+                "— alignment broken; refusing to merge"
             )
-            .cum_sum()
-            .alias("moment_id")
+        return df.with_columns(
+            classified["timeout_role"].alias("timeout_role"),
+            classified["timeout_cause"].alias("timeout_cause"),
         )
 
-        # Aggregate each moment
-        moments = (
-            spine.group_by("moment_id")
-            .agg(
-                pl.col("gameId").first(),
-                pl.col("game_date").first(),
-                pl.col("period").first(),
-                pl.col("game_seconds_elapsed").first().alias("gse"),
-                pl.col("seconds_remaining").first(),
-                pl.col("seconds_elapsed").first(),
-                pl.col("timeActual").min().alias("time_start"),
-                pl.col("timeActual").max().alias("time_end"),
-                pl.col("orderNumber").first().alias("order_before"),
-                pl.col("possession_id").last().alias("possession_id"),
-                pl.col("scoreHome").first(),
-                pl.col("scoreAway").first(),
-                pl.col("possession").first(),
-                pl.col("IsPlayoff").first(),
-                pl.col("periodType").first(),
-                pl.col("season").first(),
-                pl.col("season_type").first(),
-                pl.col("score_margin").first(),
-                pl.col("is_clutch").first(),
-                (pl.col("actionType") == "timeout").any().alias("has_timeout"),
-                (pl.col("actionType") == "period").any().alias("has_period"),
-            )
-            .sort("moment_id")
-        )
-
-        # Compute real-time excess between consecutive moments
-        game_boundary = moments["gameId"] != moments["gameId"].shift(1)
-        gap_real = (
-            pl.when(~game_boundary)
-            .then((moments["time_start"] - moments["time_end"].shift(1)).dt.total_seconds())
-            .otherwise(None)
-        )
-        gap_game = pl.when(~game_boundary).then(moments["gse"] - moments["gse"].shift(1)).otherwise(None)
-        moments = moments.with_columns((gap_real - gap_game).alias("excess"))
-
-        # Filter: large excess, no logged timeout, not a period boundary
-        candidates = moments.filter(
-            (pl.col("excess") >= CDNNBADatasetPL._TV_TIMEOUT_MIN_EXCESS_SEC)
-            & (~pl.col("has_timeout"))
-            & (~pl.col("has_period"))
-            & (pl.col("excess").is_not_null())
-        )
-
-        if candidates.height == 0:
-            return pl.DataFrame(schema=df.schema)
-
-        # Build new rows matching df's schema.
-        # orderNumber: place just before the moment (order_before - 1)
-        new_rows = pl.DataFrame(
-            {
-                "gameId": candidates["gameId"],
-                "game_date": candidates["game_date"],
-                "period": candidates["period"],
-                "game_seconds_elapsed": candidates["gse"],
-                "seconds_remaining": candidates["seconds_remaining"],
-                "seconds_elapsed": candidates["seconds_elapsed"],
-                "orderNumber": candidates["order_before"] - 1,
-                "actionType": pl.Series(["timeout"] * candidates.height, dtype=pl.String),
-                "subType": pl.Series(["official_inferred"] * candidates.height, dtype=pl.String),
-                "description": pl.Series(["Inferred TV/Official Timeout"] * candidates.height, dtype=pl.String),
-                "scoreHome": candidates["scoreHome"],
-                "scoreAway": candidates["scoreAway"],
-                "possession": candidates["possession"],
-                "IsPlayoff": candidates["IsPlayoff"],
-                "periodType": candidates["periodType"],
-                "season": candidates["season"],
-                "season_type": candidates["season_type"],
-                "personId": pl.Series([0] * candidates.height, dtype=pl.Int64),
-                "points_scored": pl.Series([0] * candidates.height, dtype=pl.Int64),
-                "score_margin": candidates["score_margin"],
-                "is_clutch": candidates["is_clutch"],
-                "possession_id": candidates["possession_id"],
-            }
-        )
-
-        # Fill remaining columns with nulls to match schema
-        for col_name, col_dtype in df.schema.items():
-            if col_name not in new_rows.columns:
-                new_rows = new_rows.with_columns(pl.lit(None).cast(col_dtype).alias(col_name))
-
-        # Reorder to match original schema
-        return new_rows.select(df.columns)
-
-    @staticmethod
-    def _inject_tv_timeouts(df: pl.DataFrame) -> pl.DataFrame:
-        """Infer TV timeouts and insert them into the DataFrame, maintaining sort order.
-
-        Uses the rulebook-based method by default. Set
-        ``CDNNBADatasetPL._USE_RULEBOOK_INJECTION = False`` to fall back
-        to the real-time excess heuristic.
-        """
-        if CDNNBADatasetPL._USE_RULEBOOK_INJECTION:
-            new_rows = CDNNBADatasetPL._infer_tv_timeouts_rulebook(df)
-        else:
-            new_rows = CDNNBADatasetPL._infer_tv_timeouts(df)
-
-        if new_rows.height == 0:
-            return df
-
-        # Cast categorical columns in new_rows to match df
-        for col_name in df.columns:
-            if df.schema[col_name] == pl.Categorical and new_rows.schema[col_name] != pl.Categorical:
-                new_rows = new_rows.with_columns(pl.col(col_name).cast(pl.Categorical))
-
-        combined = pl.concat([df, new_rows], how="diagonal_relaxed")
-        combined = combined.sort("game_date", "gameId", "orderNumber")
-
-        n_new = new_rows.height
-        n_games = new_rows["gameId"].n_unique()
-        method = "rulebook" if CDNNBADatasetPL._USE_RULEBOOK_INJECTION else "heuristic"
-        print(
-            f"  Injected {n_new:,} inferred TV timeouts ({method}) across {n_games:,} games "
-            f"({n_new / max(n_games, 1):.1f}/game)"
-        )
-        return combined
-
-    _USE_RULEBOOK_INJECTION = True  # set False for real-time excess heuristic
-
-    @staticmethod
-    def _infer_tv_timeouts_rulebook(df: pl.DataFrame) -> pl.DataFrame:
-        """Rulebook-based TV timeout detection for cdnnba.
-
-        Runs the generic ``infer_tv_timeouts_rulebook`` with post-2017
-        thresholds and cdnnba-specific action/subType conventions, then
-        builds full injection rows by joining context columns from the
-        triggering event.
-        """
-        hits = CDNNBADatasetPL.infer_tv_timeouts_rulebook(
-            df,
-            thresholds=CDNNBADatasetPL._RULEBOOK_THRESHOLDS_POST2017,
-            periods=CDNNBADatasetPL._RULEBOOK_PERIODS_POST2017,
-            coach_to_subtypes=CDNNBADatasetPL._CDNNBA_COACH_TO_SUBTYPES,
-            dead_ball_action_types=CDNNBADatasetPL._CDNNBA_DEAD_BALL_ACTION_TYPES,
-            order_col="orderNumber",
-        )
-        if hits.height == 0:
-            return pl.DataFrame(schema=df.schema)
-
-        # Look up the full row context at the triggering event via join.
-        # `order_before` is the orderNumber of the dead-ball event that
-        # triggered the mandatory. We place the injected row just before
-        # it by subtracting 1 from orderNumber (same convention as the
-        # heuristic method).
-        context_cols = [
-            "game_date",
-            "game_seconds_elapsed",
-            "seconds_elapsed",
-            "scoreHome",
-            "scoreAway",
-            "possession",
-            "IsPlayoff",
-            "periodType",
-            "season",
-            "season_type",
-            "score_margin",
-            "is_clutch",
-            "possession_id",
-        ]
-        context = df.select(
-            "gameId",
-            pl.col("orderNumber").alias("order_before"),
-            *[c for c in context_cols if c in df.columns],
-        )
-        joined = hits.join(context, on=["gameId", "order_before"], how="left")
-
-        new_rows = pl.DataFrame(
-            {
-                "gameId": joined["gameId"],
-                "game_date": joined["game_date"],
-                "period": joined["period"],
-                "game_seconds_elapsed": joined["game_seconds_elapsed"],
-                "seconds_remaining": joined["seconds_remaining"],
-                "seconds_elapsed": joined["seconds_elapsed"],
-                "orderNumber": joined["order_before"] - 1,
-                "actionType": pl.Series(["timeout"] * joined.height, dtype=pl.String),
-                "subType": pl.Series(["official_inferred"] * joined.height, dtype=pl.String),
-                "description": pl.Series(["Inferred TV/Official Timeout"] * joined.height, dtype=pl.String),
-                "scoreHome": joined["scoreHome"],
-                "scoreAway": joined["scoreAway"],
-                "possession": joined["possession"],
-                "IsPlayoff": joined["IsPlayoff"],
-                "periodType": joined["periodType"],
-                "season": joined["season"],
-                "season_type": joined["season_type"],
-                "personId": pl.Series([0] * joined.height, dtype=pl.Int64),
-                "points_scored": pl.Series([0] * joined.height, dtype=pl.Int64),
-                "score_margin": joined["score_margin"],
-                "is_clutch": joined["is_clutch"],
-                "possession_id": joined["possession_id"],
-            }
-        )
-
-        for col_name, col_dtype in df.schema.items():
-            if col_name not in new_rows.columns:
-                new_rows = new_rows.with_columns(pl.lit(None).cast(col_dtype).alias(col_name))
-
-        return new_rows.select(df.columns)
-
-    @staticmethod
-    def infer_tv_timeouts_rulebook(
-        df: pl.DataFrame,
-        thresholds: list[int],
-        periods: list[int],
-        coach_to_subtypes: list[str],
-        dead_ball_action_types: set[str],
-        action_type_col: str = "actionType",
-        sub_type_col: str = "subType",
-        gameId_col: str = "gameId",
-        period_col: str = "period",
-        sr_col: str = "seconds_remaining",
-        order_col: str = "orderNumber",
-    ) -> pl.DataFrame:
-        """Rulebook-based inference of mandatory TV timeouts.
-
-        For each (game, period in ``periods``), walk thresholds in order.
-        For each threshold T:
-          - If any coach TO fired in the window (T, prev_T], mark slot absorbed
-            and advance to next threshold.
-          - Else fire a mandatory timeout at the first dead ball with
-            seconds_remaining <= T (excluding coach TOs themselves).
-          - Only the FIRST unabsorbed slot produces a mandatory.
-
-        Parameters
-        ----------
-        df : pl.DataFrame
-            Play-by-play data. Must contain columns named by
-            ``action_type_col``, ``sub_type_col``, ``gameId_col``,
-            ``period_col``, ``sr_col``, ``order_col``.
-        thresholds : list[int]
-            Ordered list of seconds-remaining thresholds to check, e.g.
-            [540, 360, 180] for the pre-2017 9:00/6:00/3:00 marks.
-        periods : list[int]
-            Periods in which the rule applies, e.g. [2, 4] for pre-2017.
-        coach_to_subtypes : list[str]
-            subType values that indicate a coach timeout (e.g. ["Regular",
-            "Short", "Coach Challenge"] for nbastatsv3 or ["full", "challenge"]
-            for cdnnba).
-        dead_ball_action_types : set[str]
-            actionType values considered dead-ball events.
-
-        Returns
-        -------
-        pl.DataFrame with columns: gameId, period, seconds_remaining,
-        order_before (the orderNumber of the triggering event).
-        One row per inferred mandatory timeout.
-        """
-        # Vectorized implementation. For each (gameId, period):
-        #  - per threshold k with absorption window (t_k, prev_t_k]:
-        #      absorbed_k = any coach TO in that window
-        #      fire_order_k, fire_sr_k = first (smallest order_col) non-coach
-        #          dead-ball event with sr <= t_k
-        #  - the mandatory fires at the FIRST unabsorbed slot that has a fire
-        #    candidate. "Unabsorbed" = the slot wasn't skipped due to a coach
-        #    TO in its absorption window.
-        #
-        # Equivalent to the prior Python loop but computed with one group_by.
-
-        is_coach_timeout_expr = pl.col(action_type_col).is_in(["timeout", "Timeout"]) & pl.col(sub_type_col).cast(
-            pl.String
-        ).is_in(coach_to_subtypes)
-        is_dead_ball_expr = pl.col(action_type_col).is_in(list(dead_ball_action_types))
-        is_non_coach_dead_ball_expr = is_dead_ball_expr & ~is_coach_timeout_expr
-
-        working = (
-            df.filter(pl.col(period_col).is_in(periods))
-            .select(gameId_col, period_col, sr_col, order_col, action_type_col, sub_type_col)
-            .sort(gameId_col, period_col, order_col)
-        )
-
-        if working.height == 0:
-            schema = {
-                gameId_col: pl.Int64,
-                period_col: pl.Int64,
-                sr_col: pl.Float64,
-                "order_before": pl.Int64,
-            }
-            return pl.DataFrame(schema=schema)
-
-        # Build aggregation expressions: 3 per threshold.
-        agg_exprs: list[pl.Expr] = []
-        prev_ts = [720] + thresholds[:-1]
-        for prev_t, t in zip(prev_ts, thresholds):
-            # Absorbed = any coach TO with sr in (t, prev_t]
-            absorbed_expr = (
-                (is_coach_timeout_expr & (pl.col(sr_col) <= prev_t) & (pl.col(sr_col) > t)).any().alias(f"absorbed_{t}")
-            )
-            # First non-coach dead ball with sr <= t (smallest order)
-            fire_mask = is_non_coach_dead_ball_expr & (pl.col(sr_col) <= t)
-            fire_order_expr = pl.col(order_col).filter(fire_mask).first().alias(f"fire_order_{t}")
-            fire_sr_expr = pl.col(sr_col).filter(fire_mask).first().alias(f"fire_sr_{t}")
-            agg_exprs.extend([absorbed_expr, fire_order_expr, fire_sr_expr])
-
-        grouped = working.group_by([gameId_col, period_col], maintain_order=True).agg(*agg_exprs)
-
-        # Determine which slot actually fires.
-        # Slot k fires iff for all j < k the slot was either absorbed OR had no
-        # fire candidate, AND slot k is not absorbed and has a fire candidate.
-        # Build a chain of when/then (no .otherwise() until the end so we can
-        # keep appending branches — otherwise() returns a plain Expr).
-        fire_order_chain = None  # polars Then object
-        fire_sr_chain = None
-        prior_invalid_expr = pl.lit(True)  # all prior slots were invalid (no fire)
-        for t in thresholds:
-            absorbed = pl.col(f"absorbed_{t}")
-            fo = pl.col(f"fire_order_{t}")
-            fsr = pl.col(f"fire_sr_{t}")
-            slot_fires = prior_invalid_expr & ~absorbed & fo.is_not_null()
-            if fire_order_chain is None:
-                fire_order_chain = pl.when(slot_fires).then(fo)
-                fire_sr_chain = pl.when(slot_fires).then(fsr)
-            else:
-                fire_order_chain = fire_order_chain.when(slot_fires).then(fo)
-                fire_sr_chain = fire_sr_chain.when(slot_fires).then(fsr)  # type: ignore[assignment]
-            # Slot was invalid iff absorbed OR no fire candidate
-            prior_invalid_expr = prior_invalid_expr & (absorbed | fo.is_null())
-
-        assert fire_order_chain is not None and fire_sr_chain is not None
-        fire_order_expr = fire_order_chain.otherwise(None).alias("order_before")
-        fire_sr_expr = fire_sr_chain.otherwise(None).alias(sr_col)
-
-        result = (
-            grouped.with_columns(fire_order_expr, fire_sr_expr)
-            .filter(pl.col("order_before").is_not_null())
-            .select(gameId_col, period_col, sr_col, "order_before")
-        )
-        return result
+    # Post-2017 mandatory timeouts are charged to a team's count and logged
+    # identically to coach-called TOs in the cdnnba feed — no row-level
+    # injection is needed. At load time we DO enrich each row with three
+    # label columns (see ``_inject_timeout_columns`` for the source):
+    #   - ``timeout_role``       : slot_K_mandatory / discretionary / challenge / ""
+    #   - ``timeout_cause``      : tv_mandatory / coach_preempt / coach_absorb /
+    #                             coach_discretionary / challenge / ""
+    #   - ``timeout_duration_s`` : wall-clock duration in seconds (null off-TO)
+    # See ``TVTimeoutValidation.classify_timeouts`` for the cause taxonomy.
+    # CAUTION: rows with ``timeout_cause == "tv_mandatory"`` carry
+    # ``teamTricode`` / ``teamId`` per the NBA's structural charge-to-home
+    # (slot 1) or charge-to-road (slot 2) convention. For *true auto-fires*
+    # (no coach actually called the TO) the team label is a bookkeeping
+    # artifact, NOT the coach's decision. Downstream analyses that depend
+    # on which coach made a decision should restrict to ``coach_*`` causes.
 
     _VALID_OUTCOMES = {
         "made_2pt",
