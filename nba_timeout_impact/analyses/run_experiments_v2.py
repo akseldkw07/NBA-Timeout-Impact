@@ -11,13 +11,15 @@ Experiments E9-E14 build on the existing research-summary.md by:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import polars as pl
 from scipy import stats as sp_stats
 
 from nba_timeout_impact.datasets.memo_cdnnba_pl import CDNNBAMemoPL
 
-SUMMARY_PATH = "/home/Akseldkw/coding/nba/NBA-Timeout-Impact/Notebooks/studies/research-summary.md"
+SUMMARY_PATH = str(Path(__file__).resolve().parents[2] / "Notebooks" / "applied-causality" / "research-summary.md")
 
 
 # ============================================================================
@@ -107,6 +109,7 @@ def build_rich_analysis(memo, run_size: int = 6, minutes: float = 3.0) -> pl.Dat
             "seconds_remaining": df["seconds_remaining"],
             "actionType": df["actionType"],
             "subType": df["subType"],
+            "timeout_cause": df["timeout_cause"],
             "teamId": df["teamId"],
             "season": df["season"],
             "season_type": df["season_type"],
@@ -128,26 +131,45 @@ def build_rich_analysis(memo, run_size: int = 6, minutes: float = 3.0) -> pl.Dat
         ((pl.col("period") >= 4) & (pl.col("seconds_remaining") <= 300) & (pl.col("lead").abs() <= 5)).alias("clutch"),
     )
 
-    # Fine subtype classification
+    # Fine subtype classification — uses ``timeout_cause`` (cause-based
+    # taxonomy from TVTimeoutValidation) rather than the legacy subType-based
+    # split. ``official_inferred`` is dead in the new pipeline; tv_mandatory
+    # rows carry the structural signal directly.
     is_timeout = pl.col("actionType") == "timeout"
     is_stop = pl.col("actionType") == "stoppage"
+    cause = pl.col("timeout_cause")
     subtype_fine_expr = (
-        pl.when(is_timeout & (pl.col("subType") == "full"))
-        .then(pl.lit("coach_full"))
-        .when(is_timeout & (pl.col("subType") == "challenge"))
+        pl.when(is_timeout & (cause == "tv_mandatory"))
+        .then(pl.lit("tv_mandatory"))
+        .when(is_timeout & (cause == "coach_absorb"))
+        .then(pl.lit("coach_absorb"))
+        .when(is_timeout & (cause == "coach_discretionary"))
+        .then(pl.lit("coach_discretionary"))
+        .when(is_timeout & (cause == "mistagged_discretionary"))
+        .then(pl.lit("mistagged_discretionary"))
+        .when(is_timeout & (cause == "challenge"))
         .then(pl.lit("coach_challenge"))
-        .when(is_timeout & (pl.col("subType") == "official_inferred"))
-        .then(pl.lit("official_inferred"))
         .when(is_stop)
         .then(pl.lit("stoppage"))
         .otherwise(pl.lit("control"))
     )
     analysis = analysis.with_columns(subtype_fine_expr.alias("subtype_fine"))
 
-    # Coarse group (endogenous / exogenous / control)
-    endo_sub = pl.col("subtype_fine").is_in(["coach_full", "coach_challenge"])
-    exo_sub = pl.col("subtype_fine").is_in(["official_inferred", "stoppage"])
-    # For endogenous, also verify the calling team is the suffering team
+    # Coarse group (endogenous / exogenous / control).
+    # Endogenous = coach chose a *strategic* TO — coach_discretionary,
+    #              mistagged_discretionary, coach_challenge.
+    # Exogenous  = the break would have happened regardless of coach choice —
+    #              tv_mandatory (auto-fire), coach_absorb (slot was about to
+    #              fire; coach just chose the moment), or stoppage.
+    # Control    = everything else (filtered later to one event per run segment).
+    # NOTE: coach_absorb sits in exogenous because the slot was queued to
+    # auto-fire within ~80s anyway — the coach isn't gaining strategic value
+    # by calling it, just picking the moment.
+    endo_sub = pl.col("subtype_fine").is_in(["coach_discretionary", "mistagged_discretionary", "coach_challenge"])
+    exo_sub = pl.col("subtype_fine").is_in(["tv_mandatory", "coach_absorb", "stoppage"])
+    # For endogenous, also verify the calling team is the suffering team —
+    # the team being scored against is the one with strategic motive to break
+    # the run. A TO called by the running team is a different kind of event.
     suffering_called = ((pl.col("streak") > 0) & (pl.col("teamId") != pl.col("home_teamId"))) | (
         (pl.col("streak") < 0) & (pl.col("teamId") == pl.col("home_teamId"))
     )
@@ -265,7 +287,14 @@ def experiment_9(memo, analysis: pl.DataFrame):
 
     # Fine subtype breakdown
     fine_rows = []
-    for grp in ["coach_full", "coach_challenge", "official_inferred", "stoppage"]:
+    for grp in [
+        "tv_mandatory",
+        "stoppage",
+        "coach_absorb",
+        "coach_discretionary",
+        "mistagged_discretionary",
+        "coach_challenge",
+    ]:
         sub = best.filter(pl.col("subtype_fine") == grp)
         if sub.height < 30:
             continue
@@ -321,7 +350,14 @@ def experiment_10(memo, analysis: pl.DataFrame):
 
     rows = []
     ctrl = analysis.filter(pl.col("subtype_fine") == "control")["recovery"].to_numpy()
-    for sub in ["coach_full", "coach_challenge", "official_inferred", "stoppage"]:
+    for sub in [
+        "tv_mandatory",
+        "stoppage",
+        "coach_absorb",
+        "coach_discretionary",
+        "mistagged_discretionary",
+        "coach_challenge",
+    ]:
         arr = analysis.filter(pl.col("subtype_fine") == sub)["recovery"].to_numpy()
         d, p, s = welch(arr, ctrl)
         rows.append(
@@ -345,11 +381,15 @@ def experiment_10(memo, analysis: pl.DataFrame):
 
     append_md(
         "\n**Takeaways:**\n"
-        "- `coach_full` is the dominant coach-called type (~80k events).\n"
-        "- `coach_challenge` is rare but structurally distinct (coach is\n"
-        "  requesting a replay review — the team has time to talk during the\n"
-        "  review, same as a full timeout).\n"
-        "- `official_inferred` are our rulebook-injected TV/mandatory timeouts.\n"
+        "- `tv_mandatory` are league-forced commercial breaks — strictly\n"
+        "  exogenous (coach didn't choose, team owns slot per rulebook).\n"
+        "- `coach_absorb` is the much rarer endogenous TO that satisfies a\n"
+        "  pending mandatory slot (called within ~80s of the trigger).\n"
+        "- `coach_discretionary` are pure coach calls — no mandatory tag.\n"
+        '- `mistagged_discretionary` were league-tagged "mandatory" but failed\n'
+        "  the rulebook's slot-owner / first-team-TO / proximity gates. We\n"
+        "  treat them as endogenous: the coach chose to call them.\n"
+        "- `coach_challenge` is a structurally distinct coach decision.\n"
         "- `stoppage` events (out-of-bounds, injury, etc.) are grouped with\n"
         "  exogenous in other experiments; here we see them separately.\n"
     )

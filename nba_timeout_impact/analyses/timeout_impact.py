@@ -246,19 +246,24 @@ def build_timeout_events(memo: CDNNBAMemoPL, window: int = 6) -> pl.DataFrame:
             "season_type",
             "IsPlayoff",
             pl.col("subType").alias("timeout_subtype"),
+            "timeout_cause",
             pl.col("teamId").alias("_teamId_raw"),
             pl.col("_streak").alias("_streak_home"),
         )
     )
 
     # ---- 3. Join + determine calling team ----
+    # is_endogenous = strategic coach call (coach_discretionary,
+    # mistagged_discretionary, challenge). tv_mandatory + coach_absorb are
+    # treated as exogenous — the league was firing the slot either way.
+    endo_causes = ["coach_discretionary", "mistagged_discretionary", "challenge"]
     events = timeouts.join(p, on=["gameId", "possession_id"], how="inner")
     events = events.with_columns(
-        pl.when(pl.col("timeout_subtype").is_in(["full", "challenge"]))
+        pl.when(pl.col("timeout_cause").is_in(endo_causes))
         .then(pl.col("_teamId_raw"))
         .otherwise(pl.col("possession"))
         .alias("calling_team"),
-        pl.col("timeout_subtype").is_in(["full", "challenge"]).alias("is_endogenous"),
+        pl.col("timeout_cause").is_in(endo_causes).alias("is_endogenous"),
     )
 
     # Attach opponent_team via team_pairs

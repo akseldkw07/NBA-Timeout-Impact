@@ -129,15 +129,41 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
 
     @memo_series
     def f_timeout_endogenous(self) -> pl.Series:
-        """Coach-called timeouts (full or challenge)."""
-        df = self.cdnnba
-        return (df["actionType"] == "timeout") & df["subType"].is_in(["full", "challenge"])
+        """Boolean mask: row is a coach-chosen *strategic* timeout (endogenous).
+
+        Includes ``coach_discretionary`` (no mandatory tag), ``mistagged_discretionary``
+        (league-tagged mandatory that failed rulebook gates — still a coach
+        decision), and ``challenge`` (coach-initiated replay challenge).
+
+        Excludes ``coach_absorb``: those satisfy a slot that was queued to
+        auto-fire within ~80s of the trigger anyway, so the coach isn't
+        gaining strategic option-value by calling them — they're treated as
+        exogenous via ``f_timeout_exogenous``.
+        """
+        return self.cdnnba["timeout_cause"].is_in(["coach_discretionary", "mistagged_discretionary", "challenge"])
 
     @memo_series
     def f_timeout_exogenous(self) -> pl.Series:
-        """Inferred TV/official timeouts (injected during load)."""
-        df = self.cdnnba
-        return (df["actionType"] == "timeout") & (df["subType"] == "official_inferred")
+        """Boolean mask: row is a timeout that would have happened regardless
+        of coach choice (exogenous).
+
+        Includes ``tv_mandatory`` (league auto-fired the slot — sr ≤ trigger,
+        team matches rulebook slot owner) AND ``coach_absorb`` (coach called
+        just before the trigger fired; the slot was queued to auto-fire
+        either way, so the coach isn't gaining strategic value).
+        """
+        return self.cdnnba["timeout_cause"].is_in(["tv_mandatory", "coach_absorb"])
+
+    @memo_series
+    def f_exogenous_break(self) -> pl.Series:
+        """Boolean mask: row is an exogenous break — game environment forced it.
+
+        Includes ``f_timeout_exogenous`` (tv_mandatory + coach_absorb) AND
+        ``stoppage`` events (out-of-bounds, injury, blood rule, equipment,
+        etc.). Used by run-recovery experiments to define the exogenous
+        treatment group.
+        """
+        return self.f_timeout_exogenous | (self.cdnnba["actionType"] == "stoppage")
 
     # ``timeout_duration_s`` is no longer a memo series — it's persisted
     # directly on ``CDNNBADatasetPL`` at load time (see
@@ -611,6 +637,7 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
                 "game_seconds_elapsed": df["game_seconds_elapsed"],
                 "actionType": df["actionType"],
                 "subType": df["subType"],
+                "timeout_cause": df["timeout_cause"],
                 "teamId": df["teamId"],
                 "streak": streak_s,
                 "lead": lead_s,
@@ -640,10 +667,15 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
             .alias("running_team_pts"),
         )
 
-        # Classify events
+        # Classify events using cause-based taxonomy.
+        # Endogenous = strategic coach calls (coach_discretionary,
+        # mistagged_discretionary, challenge). Exogenous = the break would
+        # have happened either way (tv_mandatory, coach_absorb) or a natural
+        # stoppage.
         is_timeout = pl.col("actionType") == "timeout"
-        is_endogenous_sub = pl.col("subType").is_in(["full", "challenge"])
-        is_exogenous_sub = pl.col("subType") == "official_inferred"
+        cause = pl.col("timeout_cause")
+        is_endogenous_cause = cause.is_in(["coach_discretionary", "mistagged_discretionary", "challenge"])
+        is_exogenous_cause = cause.is_in(["tv_mandatory", "coach_absorb"])
         is_stoppage = pl.col("actionType") == "stoppage"
 
         # For endogenous: timeout called by the SUFFERING team
@@ -654,9 +686,9 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         )
 
         analysis = analysis.with_columns(
-            pl.when(is_timeout & is_endogenous_sub & suffering_called)
+            pl.when(is_timeout & is_endogenous_cause & suffering_called)
             .then(pl.lit("endogenous"))
-            .when(is_timeout & is_exogenous_sub)
+            .when(is_timeout & is_exogenous_cause)
             .then(pl.lit("exogenous"))
             .when(is_stoppage)
             .then(pl.lit("exogenous"))
