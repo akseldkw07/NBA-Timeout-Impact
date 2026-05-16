@@ -609,20 +609,25 @@ class TVTimeoutValidation(CDNNBATimeoutValidation, V3TimeoutValidation):
 
         # Rulebook classification:
         #   slot K  = K-th mandatory-qualified TO in the period.
-        #   sr ≤ trigger_K                  → tv_mandatory (trigger had fired).
+        #   sr ≤ trigger_K  AND team owns slot K   → tv_mandatory (exogenous —
+        #                                            league auto-fired this).
         #   sr > trigger_K  AND
         #     first team full TO AND
         #     sr − trigger_K ≤ k_buf AND
-        #     team owns slot K (home for K=1, → coach_absorb (legit absorb).
-        #     other team for K=2)
-        #   else (pre_trigger but failing the absorb gates) → mistagged_discretionary.
+        #     team owns slot K                     → coach_absorb (legit absorb).
+        #   Everything else mandatory-qualified    → mistagged_discretionary.
+        # The team-owner gate applies to BOTH tv_mandatory AND coach_absorb:
+        # a mandatory-qualified row charged to the wrong team is a coach call
+        # that happened to land past the trigger, NOT an exogenous auto-fire.
+        # Causal analysis filters to tv_mandatory as "coach didn't choose
+        # this" — the team check enforces that semantics.
+        # Slot ownership default: slot 1 → home, slot 2 → other team.
+        # Slots beyond 2 (pre-2017 Q2/Q4 has 3) get no structural gate —
+        # the alternation pattern for the third trigger isn't in the
+        # post-2020 rulebook we have, so we don't impose one.
         for periods_ok, triggers in slot_table:
             in_periods = df_pd["period"].isin(periods_ok)
             for K, trigger in enumerate(triggers, start=1):
-                # Structural slot-owner gate: slot 1 → home, slot 2 → other team.
-                # Slots beyond 2 (pre-2017 Q2/Q4 has 3) get no structural gate —
-                # the alternation pattern for the third trigger isn't in the
-                # post-2020 rulebook we have, so we don't impose one.
                 if K == 1:
                     correct_team = is_home_to | team_unknown
                 elif K == 2:
@@ -631,7 +636,9 @@ class TVTimeoutValidation(CDNNBATimeoutValidation, V3TimeoutValidation):
                     correct_team = pd.Series(True, index=df_pd.index)
 
                 mask = is_full_to & is_mandatory & in_periods & (cum_mand == K)
-                df_pd.loc[mask & (sr <= trigger), "timeout_cause"] = "tv_mandatory"
+                at_or_past_trigger = mask & (sr <= trigger)
+                df_pd.loc[at_or_past_trigger & correct_team, "timeout_cause"] = "tv_mandatory"
+                df_pd.loc[at_or_past_trigger & ~correct_team, "timeout_cause"] = "mistagged_discretionary"
                 pre_trigger = mask & (sr > trigger)
                 absorb_eligible = (
                     pre_trigger & is_first_team_full_to & ((sr - trigger) <= k_absorb_buffer_s) & correct_team
