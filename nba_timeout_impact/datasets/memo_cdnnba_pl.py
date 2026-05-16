@@ -139,44 +139,10 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         df = self.cdnnba
         return (df["actionType"] == "timeout") & (df["subType"] == "official_inferred")
 
-    @memo_series
-    def timeout_duration_s(self) -> pl.Series:
-        """Best-guess wall-clock duration of each ``timeout`` row, in seconds.
-
-        For each timeout row, the duration is the gap from this row's
-        ``timeActual`` to the next event that represents *actual game
-        resumption*. Resumption excludes ``substitution`` / ``stoppage`` /
-        ``instantreplay`` rows — those are logged DURING the TV break
-        itself (subs at the start of the break, replay reviews mid-break)
-        and don't mark play resuming. Without that exclusion the duration
-        is dominated by the sub event ~0-10s after the TO, obscuring the
-        actual TV-break length.
-
-        Empirically on 2020-2025:
-            mandatory TOs (``qualifiers`` contains ``"mandatory"``):
-                median ≈ 189s (the TV broadcast break)
-            discretionary TOs (``qualifiers`` == ``"team"`` only):
-                median ≈ 109s (regular 60-100s coach TO + slack)
-
-        Returns NaN for non-timeout rows.
-        """
-        df = self.cdnnba
-        excluded = ["substitution", "stoppage", "instantreplay"]
-        out = df.with_columns(
-            pl.when(~pl.col("actionType").is_in(excluded))
-            .then(pl.col("timeActual"))
-            .otherwise(None)
-            .shift(-1)
-            .fill_null(strategy="backward")
-            .over("gameId")
-            .alias("_next_resume_t"),
-        ).select(
-            pl.when(pl.col("actionType") == "timeout")
-            .then((pl.col("_next_resume_t") - pl.col("timeActual")).dt.total_seconds())
-            .otherwise(None)
-            .alias("timeout_duration_s"),
-        )
-        return out["timeout_duration_s"]
+    # ``timeout_duration_s`` is no longer a memo series — it's persisted
+    # directly on ``CDNNBADatasetPL`` at load time (see
+    # ``CDNNBADatasetPL._inject_timeout_columns``). Access via
+    # ``self.cdnnba["timeout_duration_s"]``.
 
     @memo_series
     def f_stoppage(self) -> pl.Series:

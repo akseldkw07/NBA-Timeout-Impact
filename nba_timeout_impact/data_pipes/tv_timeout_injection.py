@@ -84,6 +84,21 @@ POST_2017_SLOTS = [
 #  Cause-classification thresholds (cdnnba only — v3 uses subType directly)   #
 # --------------------------------------------------------------------------- #
 
+# Cutoffs below are rulebook-informed but rules-based — they hard-partition
+# the (sr, duration) plane into the cause categories. Rules-based is the
+# right call for a causal study (transparent, no fitted parameters, no
+# information leakage from the outcome). The empirical (sr, duration)
+# distribution IS bimodal at ~110s vs ~190s with a valley near 135-145s,
+# so the threshold values matter modestly but the buckets are unambiguous.
+#
+# TODO (only if causal estimates turn out sensitive to these cutoffs):
+#   - Replace the duration filter with a GMM/Otsu data-driven valley split.
+#   - Add a sequence-position signal (cum prior TOs in period) to
+#     disambiguate "first dead ball after trigger" (auto-fire) from "coach
+#     called at trigger" — the Nth TO at sr=415 has very different odds of
+#     being auto-fired than the 1st.
+# Run the sensitivity sweep before pursuing either.
+
 # How far below a trigger a mandatory must sit to count as a "true TV break"
 # auto-fire vs a coach-absorb far from the trigger. The first dead ball after
 # a trigger expires is usually within ~30s; we use 60s as a generous window.
@@ -93,6 +108,18 @@ TV_BREAK_SR_BUFFER_S = 60
 # run 2:45 local / 3:15 national. Anything below ~150s is almost certainly a
 # coach-absorbed mandatory slot where no real TV break was taken.
 TV_BREAK_DURATION_MIN_S = 150
+
+# How close (in seconds) above a trigger a coach TO can sit and still be
+# classified as ``coach_preempt`` rather than ``coach_absorb``. Coach TOs
+# called within this window absorbed an imminent league-forced trigger.
+COACH_PREEMPT_SR_BUFFER_S = 30
+
+# Sanity bounds for ``timeout_duration_s``. cdnnba's ``timeActual`` has rare
+# data glitches (rows where the wall-clock jumps backwards by a full day or
+# similar). Anything outside this range is set to null instead of being
+# allowed to pollute downstream filters.
+DURATION_SANITY_MIN_S = 0
+DURATION_SANITY_MAX_S = 600  # 10 minutes — well above any real TO
 
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +181,44 @@ class TVTimeoutValidation:
             raise ValueError(f"unknown source {source!r}, expected one of {list(SOURCE_CONFIGS)}")
         return SOURCE_CONFIGS[source]
 
+    # ---------- shared duration computer ----------
+
+    @staticmethod
+    def compute_timeout_duration_s(df: pl.DataFrame) -> pl.Series:
+        """Wall-clock seconds from each ``timeout`` row to the next event that
+        represents game resumption.
+
+        "Resumption" excludes ``substitution`` / ``stoppage`` / ``instantreplay``
+        rows — those are logged DURING the TV break itself. Returns null on
+        non-timeout rows AND on rows where ``timeActual`` glitches produce
+        durations outside ``[DURATION_SANITY_MIN_S, DURATION_SANITY_MAX_S]``.
+
+        Called by ``CDNNBADatasetPL._inject_timeout_columns`` at load time;
+        the result is persisted as the ``timeout_duration_s`` column.
+        Caller's input must contain ``actionType``, ``timeActual``, ``gameId``.
+        """
+        excluded = ["substitution", "stoppage", "instantreplay"]
+        next_resume = (
+            pl.when(~pl.col("actionType").is_in(excluded))
+            .then(pl.col("timeActual"))
+            .otherwise(None)
+            .shift(-1)
+            .fill_null(strategy="backward")
+            .over("gameId")
+        )
+        raw_delta = (next_resume - pl.col("timeActual")).dt.total_seconds()
+        result = df.select(
+            pl.when(
+                (pl.col("actionType") == "timeout")
+                & (raw_delta >= DURATION_SANITY_MIN_S)
+                & (raw_delta <= DURATION_SANITY_MAX_S)
+            )
+            .then(raw_delta)
+            .otherwise(None)
+            .alias("timeout_duration_s")
+        )
+        return result["timeout_duration_s"]
+
     # ---------- classification ----------
 
     @staticmethod
@@ -180,7 +245,10 @@ class TVTimeoutValidation:
             lo, hi = seasons
             df_pd = df_pd[df_pd["season"].between(lo, hi)].copy()
 
-        df_pd = df_pd.sort_values(["gameId", cfg["order_col"]]).reset_index(drop=True)
+        # Keep the input row order — every label decision below is row-local
+        # (``personId == 0``, ``qualifiers`` contains ``"mandatory"``, sr
+        # position). Resorting would break alignment with ``memo.cdnnba``
+        # and any other memo series the caller wants to join row-wise.
         df_pd["actionType"] = df_pd["actionType"].astype(str).str.strip()
         df_pd["subType"] = df_pd["subType"].astype(str).str.strip()
 
@@ -209,11 +277,22 @@ class TVTimeoutValidation:
         #   ""                  — non-timeout
         #   "challenge"         — coach challenge
         #   "coach_discretionary" — coach TO that didn't fill a mandatory slot
-        #   "tv_mandatory"      — league-forced TV commercial break (EXOGENOUS)
-        #   "coach_absorb"      — coach TO that absorbed a mandatory slot but
-        #                         doesn't look like a real TV break
+        #   "tv_mandatory"      — league-forced TV commercial break (EXOGENOUS).
+        #                         Caveat: cdnnba charges the slot to home (slot 1)
+        #                         or road (slot 2) by rule. The ``teamTricode`` /
+        #                         ``teamId`` on these rows reflects the rulebook
+        #                         charge, NOT the coach's decision — for true
+        #                         auto-fires no coach called this timeout.
+        #   "coach_preempt"     — coach TO at sr ∈ (trigger, trigger + 30] that
+        #                         absorbed a mandatory slot the league was
+        #                         about to fire. Near-exogenous timing (the
+        #                         trigger was imminent) but coach-initiated.
+        #   "coach_absorb"      — coach TO that absorbed a mandatory slot
+        #                         well before the trigger would have fired
+        #                         (or without a real TV break taken).
         #
         # For causal analysis, filter to ``timeout_cause == "tv_mandatory"``.
+        # ``coach_preempt`` is a candidate sensitivity-analysis bucket.
         df_pd["timeout_cause"] = ""
         df_pd.loc[is_challenge, "timeout_cause"] = "challenge"
         df_pd.loc[is_full_to & ~is_mandatory, "timeout_cause"] = "coach_discretionary"
@@ -221,18 +300,23 @@ class TVTimeoutValidation:
         if source == "v3":
             # v3 directly labels Officials with personId == 0; no need for
             # position/duration heuristics. Every mandatory row IS a TV break.
+            # (``coach_preempt`` doesn't apply to v3 since v3 separates Officials
+            # from coach TOs into distinct rows.)
             df_pd.loc[is_full_to & is_mandatory, "timeout_cause"] = "tv_mandatory"
         else:
             # cdnnba: ``qualifiers`` merges auto-fires with coach-absorbed
-            # mandatories. Distinguish by:
-            #   (a) sr just below a rulebook trigger (the first dead ball
-            #       after the trigger expires), AND
-            #   (b) wall-clock duration ≥ TV_BREAK_DURATION_MIN_S
+            # mandatories. Distinguish three sub-cases via sr position
+            # relative to the rulebook triggers + wall-clock duration:
+            #   (a) sr ∈ [trigger - 60, trigger] AND duration ≥ 150s → tv_mandatory
+            #   (b) sr ∈ (trigger, trigger + 30]                     → coach_preempt
+            #   (c) everything else mandatory                         → coach_absorb
             near_trigger = pd.Series(False, index=df_pd.index)
+            preempt_zone = pd.Series(False, index=df_pd.index)
             for periods_ok, triggers in slot_table:
                 in_periods = df_pd["period"].isin(periods_ok)
                 for t in triggers:
                     near_trigger |= in_periods & (sr <= t) & (sr >= t - TV_BREAK_SR_BUFFER_S)
+                    preempt_zone |= in_periods & (sr > t) & (sr <= t + COACH_PREEMPT_SR_BUFFER_S)
 
             if "timeout_duration_s" in df_pd.columns:
                 long_enough = df_pd["timeout_duration_s"].fillna(0) >= TV_BREAK_DURATION_MIN_S
@@ -242,8 +326,10 @@ class TVTimeoutValidation:
                 long_enough = pd.Series(True, index=df_pd.index)
 
             is_tv = is_full_to & is_mandatory & near_trigger & long_enough
-            is_absorb = is_full_to & is_mandatory & ~is_tv
+            is_preempt = is_full_to & is_mandatory & preempt_zone & ~is_tv
+            is_absorb = is_full_to & is_mandatory & ~is_tv & ~is_preempt
             df_pd.loc[is_tv, "timeout_cause"] = "tv_mandatory"
+            df_pd.loc[is_preempt, "timeout_cause"] = "coach_preempt"
             df_pd.loc[is_absorb, "timeout_cause"] = "coach_absorb"
 
         return pl.from_pandas(df_pd)
@@ -320,23 +406,10 @@ class TVTimeoutValidation:
         else:
             df = memo
 
-        # If the caller passed a ``CDNNBAMemoPL`` (or any memo exposing the
-        # ``timeout_duration_s`` ``@memo_series``), materialize it as a
-        # regular column so downstream plotting can read it without having
-        # to recompute. Plain ``pl.DataFrame`` inputs skip this — they
-        # don't carry the memo. ``getattr`` (not attribute access) because
-        # the type of ``memo`` is not statically known to declare this.
-        if (
-            hasattr(type(memo), "timeout_duration_s")
-            and isinstance(df, pl.DataFrame)
-            and "timeout_duration_s" not in df.columns
-        ):
-            try:
-                dur = getattr(memo, "timeout_duration_s")
-                if isinstance(dur, pl.Series) and len(dur) == df.height:
-                    df = df.with_columns(dur.alias("timeout_duration_s"))
-            except Exception:  # noqa: BLE001 — memo may not be ready; degrade gracefully
-                pass
+        # ``timeout_duration_s`` is persisted on the frame at load time
+        # (see ``CDNNBADatasetPL._inject_timeout_columns``). If the caller
+        # bypassed the loader and passed a raw parquet, the column won't
+        # be present and the cause classifier falls back to position-only.
 
         wanted = [
             "gameId",

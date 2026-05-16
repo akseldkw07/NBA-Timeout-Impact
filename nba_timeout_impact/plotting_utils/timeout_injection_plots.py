@@ -35,6 +35,16 @@ ROLE_COLORS = {
     "challenge": "tab:purple",
 }
 
+# Colors for the timeout_cause taxonomy — used by plots that color by cause
+# rather than by slot role.
+CAUSE_COLORS = {
+    "tv_mandatory": "tab:green",
+    "coach_preempt": "tab:blue",
+    "coach_absorb": "tab:olive",
+    "coach_discretionary": "tab:gray",
+    "challenge": "tab:purple",
+}
+
 
 class TimeoutInjectionPlots:
     """Static plotting helpers for `TVTimeoutValidation` outputs."""
@@ -195,8 +205,9 @@ class TimeoutInjectionPlots:
         width_per: float = 14,
         causes: tuple[str, ...] | None = None,
         combine_periods: bool = False,
+        color_by: Literal["role", "cause"] = "role",
     ):
-        """Histogram of predicted ``timeout_role`` distribution vs
+        """Histogram of predicted timeout label distribution vs
         ``seconds_remaining``.
 
         Use this to spot whether the classifier's predicted mandatories
@@ -204,11 +215,19 @@ class TimeoutInjectionPlots:
         empirical data should, and whether ``discretionary`` predictions
         sit where they should (clutch time, pre-trigger).
 
-        ``causes``: optional iterable of ``timeout_cause`` values to keep
-        (``"tv_mandatory"``, ``"coach_absorb"``, ``"coach_discretionary"``,
-        ``"challenge"``). If ``None`` (default), include everything.
-        Use ``causes=("tv_mandatory",)`` to see only the league-forced
-        commercial-break events used in causal analysis.
+        ``color_by``:
+            - ``"role"`` (default): stack bars by ``timeout_role``
+              (``slot_K_mandatory`` / ``discretionary`` / ``challenge``) —
+              shows the slot structure.
+            - ``"cause"``: stack bars by ``timeout_cause``
+              (``tv_mandatory`` / ``coach_preempt`` / ``coach_absorb`` /
+              ``coach_discretionary`` / ``challenge``) — shows the causal
+              taxonomy.
+
+        ``causes``: optional iterable of ``timeout_cause`` values to KEEP
+        as a row filter (orthogonal to ``color_by``). If ``None`` (default),
+        include everything. Use ``causes=("tv_mandatory",)`` to see only
+        the league-forced commercial-break events used in causal analysis.
 
         ``combine_periods``: if True, render a single panel aggregating all
         ``periods`` together. Default False = one panel per period.
@@ -222,7 +241,20 @@ class TimeoutInjectionPlots:
                     "TVTimeoutValidation.classify_timeouts to generate it."
                 )
             tos = tos[tos["timeout_cause"].isin(list(causes))].copy()
-        roles_present = [r for r in ROLE_COLORS if (tos["timeout_role"] == r).any()]
+
+        if color_by == "role":
+            label_col, palette = "timeout_role", ROLE_COLORS
+        elif color_by == "cause":
+            if "timeout_cause" not in tos.columns:
+                raise ValueError(
+                    "color_by='cause' requires `timeout_cause` column — re-run "
+                    "TVTimeoutValidation.classify_timeouts to generate it."
+                )
+            label_col, palette = "timeout_cause", CAUSE_COLORS
+        else:
+            raise ValueError(f"color_by must be 'role' or 'cause', got {color_by!r}")
+
+        labels_present = [k for k in palette if (tos[label_col] == k).any()]
 
         bins = np.arange(0, 720 + width, width)
         cause_suffix = f"  [causes={','.join(causes)}]" if causes is not None else ""
@@ -236,18 +268,18 @@ class TimeoutInjectionPlots:
 
         for ax, per in panel_iter:
             sub = tos if per is None else tos[tos["period"] == per]
-            stacks = [sub.loc[sub["timeout_role"] == r, "seconds_remaining"].to_numpy() for r in roles_present]
-            colors = [ROLE_COLORS[r] for r in roles_present]
-            labels = [f"{r} (n={len(s):,})" for r, s in zip(roles_present, stacks)]
-            ax.hist(stacks, bins=bins, stacked=True, color=colors, label=labels, edgecolor="white", linewidth=0.3)  # type: ignore
+            stacks = [sub.loc[sub[label_col] == k, "seconds_remaining"].to_numpy() for k in labels_present]
+            colors = [palette[k] for k in labels_present]
+            legend_labels = [f"{k} (n={len(s):,})" for k, s in zip(labels_present, stacks)]
+            ax.hist(stacks, bins=bins, stacked=True, color=colors, label=legend_labels, edgecolor="white", linewidth=0.3)  # type: ignore
             for x, lbl, c in POST_2017_TRIGGERS:
                 ax.axvline(x, color=c, linestyle="--", linewidth=1)
             period_label = f"Q{'/'.join(map(str, periods))}" if per is None else f"Period {per}"
-            ax.set_title(f"{period_label}  (n={len(sub):,}){cause_suffix}")
+            ax.set_title(f"{period_label}  (n={len(sub):,})  [color={color_by}]{cause_suffix}")
             ax.set_ylabel(f"count (bin = {width}s)")
             ax.legend(loc="upper left", fontsize=7)
 
-        last_ax = axes if combine_periods else axes[-1]
+        last_ax = axes if isinstance(axes, plt.Axes) else axes[-1]
         last_ax.set_xlabel("seconds remaining in period (bin floor)")
         return fig, axes
 
@@ -270,10 +302,10 @@ class TimeoutInjectionPlots:
         for TV breaks) than regular coach TOs (≈60-120s).
 
         **Duration source** (resolved in this order):
-            1. ``classified_cdnnba[duration_col]`` — the
-               ``CDNNBAMemoPL.timeout_duration_s`` ``@memo_series`` flowed
-               in via ``_prep_cdnnba``. Preferred — pre-computed once,
-               correctly excludes subs/stoppages/instantreplay.
+            1. ``classified_cdnnba[duration_col]`` — persisted by
+               ``CDNNBADatasetPL._inject_timeout_columns`` at load time.
+               Preferred: same logic as everywhere else, correctly
+               excludes subs/stoppages/instantreplay, sanity-clamped.
             2. ``full_pbp_pl`` with a ``timeActual`` column — fall back to
                on-the-fly computation (uses ``exclude_next_action_types``).
             3. Else: TO-to-TO delta only (coarse).

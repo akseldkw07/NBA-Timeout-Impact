@@ -78,6 +78,11 @@ class CDNNBADatasetPL(Enriched_DF_PL):
 
     # -- enriched columns --
     season_type: pl.Series  # String
+    timeout_role: pl.Series  # String — slot_K_mandatory / discretionary / challenge / ""
+    timeout_cause: (
+        pl.Series
+    )  # String — tv_mandatory / coach_preempt / coach_absorb / coach_discretionary / challenge / ""
+    timeout_duration_s: pl.Series  # Float64 — wall-clock seconds to game resumption; null on non-TO rows
     season: pl.Series  # Int64
     shot_value: pl.Series  # Int64
     points_scored: pl.Series  # Int64
@@ -115,17 +120,65 @@ class CDNNBADatasetPL(Enriched_DF_PL):
 
     @classmethod
     def load_from_parquet(cls, path: str | Path | None = None) -> "CDNNBADatasetPL":
+        """Load the enriched cdnnba parquet and inject the timeout
+        classification columns (``timeout_role``, ``timeout_cause``,
+        ``timeout_duration_s``).
+
+        Injection preserves row order — the classifier doesn't sort — so
+        the result is row-aligned with the raw parquet and the
+        ``CDNNBAMemoPL`` memo series.
+        """
         path = path or NBAConstants.NBA_DATA_DIR / "cdnnba_enriched.parquet"
         df = pl.read_parquet(path)
+        df = cls._inject_timeout_columns(df)
         ret = cls(df)
         ret.validate_data()
         return ret
 
+    @staticmethod
+    def _inject_timeout_columns(df: pl.DataFrame) -> pl.DataFrame:
+        """Add ``timeout_role``, ``timeout_cause``, and ``timeout_duration_s``
+        to a raw cdnnba frame.
+
+        Uses ``TVTimeoutValidation.compute_timeout_duration_s`` for the
+        wall-clock duration (sanity-clamped to ``[0, 600]`` seconds; nulls
+        outside that range).
+
+        Preserves row order so the result is row-aligned with the input.
+        Raises if the classifier ever returns a different height than the
+        input — alignment is a hard contract.
+        """
+        # Local import to avoid a circular dependency at module load time.
+        from nba_timeout_impact.data_pipes.tv_timeout_injection import TVTimeoutValidation
+
+        duration = TVTimeoutValidation.compute_timeout_duration_s(df)
+        df = df.with_columns(duration.alias("timeout_duration_s"))
+        classified = TVTimeoutValidation.classify_timeouts(df, source="cdnnba")
+        if classified.height != df.height:
+            raise RuntimeError(
+                f"timeout classifier dropped rows ({classified.height} vs {df.height}) "
+                "— alignment broken; refusing to merge"
+            )
+        return df.with_columns(
+            classified["timeout_role"].alias("timeout_role"),
+            classified["timeout_cause"].alias("timeout_cause"),
+        )
+
     # Post-2017 mandatory timeouts are charged to a team's count and logged
-    # identically to coach-called TOs in the cdnnba feed — no injection is
-    # needed. Use ``analyses.tv_timeout_validation.TVTimeoutValidation``
-    # ``.classify_timeouts()`` to label existing rows with their role
-    # (slot_K_mandatory / slot_K_absorbed / discretionary / challenge).
+    # identically to coach-called TOs in the cdnnba feed — no row-level
+    # injection is needed. At load time we DO enrich each row with three
+    # label columns (see ``_inject_timeout_columns`` for the source):
+    #   - ``timeout_role``       : slot_K_mandatory / discretionary / challenge / ""
+    #   - ``timeout_cause``      : tv_mandatory / coach_preempt / coach_absorb /
+    #                             coach_discretionary / challenge / ""
+    #   - ``timeout_duration_s`` : wall-clock duration in seconds (null off-TO)
+    # See ``TVTimeoutValidation.classify_timeouts`` for the cause taxonomy.
+    # CAUTION: rows with ``timeout_cause == "tv_mandatory"`` carry
+    # ``teamTricode`` / ``teamId`` per the NBA's structural charge-to-home
+    # (slot 1) or charge-to-road (slot 2) convention. For *true auto-fires*
+    # (no coach actually called the TO) the team label is a bookkeeping
+    # artifact, NOT the coach's decision. Downstream analyses that depend
+    # on which coach made a decision should restrict to ``coach_*`` causes.
 
     _VALID_OUTCOMES = {
         "made_2pt",
