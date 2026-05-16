@@ -160,16 +160,108 @@ class ValidationResult:
 # --------------------------------------------------------------------------- #
 
 
-class TVTimeoutValidation:
-    """Static-method container for mandatory-timeout reclassification + validation."""
+class V3TimeoutValidation:
+    """Parent class — nbastatsv3 (pre-2017) timeout classification + validation.
+
+    Holds everything that's specific to the v3 feed: the ground-truth mask
+    (``subType ∈ {"Official", "Official TV"}``), the v3-flavoured prep/
+    validate/confusion-matrix entry points, and the back-compat
+    ``_score_row_by_row`` shim used by the auto-claude notebook.
+    """
 
     @staticmethod
-    def get_source_config(source: Source) -> dict:
-        if source not in SOURCE_CONFIGS:
-            raise ValueError(f"unknown source {source!r}, expected one of {list(SOURCE_CONFIGS)}")
-        return SOURCE_CONFIGS[source]
+    def _v3_gt_mask() -> pl.Expr:
+        """Polars boolean expr: row is a v3 league-fired mandatory."""
+        return pl.col("subType").cast(pl.String).str.strip_chars().is_in(["Official", "Official TV"])
 
-    # ---------- shared duration computer ----------
+    @staticmethod
+    def _prep_v3(memo: NBAMemoDF, seasons: tuple[int, int] | None = None) -> pl.DataFrame:
+        v3 = memo.data
+        cols = [
+            "gameId",
+            "actionNumber",
+            "period",
+            "actionType",
+            "subType",
+            "seconds_remaining",
+            "season",
+            "season_type",
+            "personId",
+        ]
+        cols = [c for c in cols if c in v3.columns]
+        if seasons is None:
+            sub = v3[cols].copy()
+        else:
+            sub = v3[(v3["season"] >= seasons[0]) & (v3["season"] <= seasons[1])][cols].copy()
+        for col in ("actionType", "subType"):
+            sub[col] = sub[col].astype("string").str.strip()
+        return pl.from_pandas(sub)
+
+    @staticmethod
+    def validate_against_v3(
+        memo: NBAMemoDF,
+        seasons: tuple[int, int] | None = None,
+        label: str = "v3 reclassification",
+    ) -> ValidationResult:
+        """Score ``classify_timeouts`` predictions against v3 ground-truth
+        ``Official`` / ``Official TV`` subType labels.
+        """
+        v3_pl = V3TimeoutValidation._prep_v3(memo, seasons)
+        classified = TVTimeoutValidation.classify_timeouts(v3_pl, source="v3", seasons=seasons)
+        return _score_generic(
+            classified,
+            V3TimeoutValidation._v3_gt_mask(),
+            seasons=seasons,
+            label=label,
+            action="Timeout",
+        )
+
+    @staticmethod
+    def confusion_matrix_v3(memo: NBAMemoDF, seasons: tuple[int, int] | None = None) -> pd.DataFrame:
+        v3_pl = V3TimeoutValidation._prep_v3(memo, seasons)
+        classified = TVTimeoutValidation.classify_timeouts(v3_pl, source="v3", seasons=seasons)
+        tos = (
+            classified.filter(pl.col("actionType").cast(pl.String).str.strip_chars() == "Timeout")
+            .select(
+                pl.col("subType").cast(pl.String).str.strip_chars().alias("gt_subType"),
+                pl.col("timeout_role").alias("predicted_role"),
+            )
+            .to_pandas()
+        )
+        return pd.crosstab(tos["gt_subType"], tos["predicted_role"], margins=True, margins_name="TOTAL")
+
+    # Back-compat shim for the older auto-claude notebook, which calls
+    # ``TVTimeoutValidation._score_row_by_row(classified, seasons=..., tolerance_s=0, label=...)``.
+    # ``tolerance_s`` is no longer meaningful (no fuzzy clock matching) — accepted and ignored.
+    @staticmethod
+    def _score_row_by_row(
+        classified: pl.DataFrame,
+        seasons: tuple[int, int] | None = None,
+        tolerance_s: int = 0,  # noqa: ARG004 — accepted for back-compat
+        label: str = "v3 reclassification",
+    ) -> ValidationResult:
+        return _score_generic(
+            classified,
+            V3TimeoutValidation._v3_gt_mask(),
+            seasons=seasons,
+            label=label,
+            action="Timeout",
+        )
+
+
+class CDNNBATimeoutValidation:
+    """Parent class — cdnnba (post-2017) timeout classification + validation.
+
+    Holds everything that's specific to the cdnnba feed: the ground-truth
+    mask (``qualifiers`` contains ``"mandatory"``), the wall-clock duration
+    computer (which uses ``timeActual`` — cdnnba-only), and the
+    prep/validate/confusion-matrix entry points.
+    """
+
+    @staticmethod
+    def _cdnnba_gt_mask() -> pl.Expr:
+        """Polars boolean expr: row is a cdnnba mandatory-qualified TO."""
+        return pl.col("qualifiers").cast(pl.String).str.contains("mandatory")
 
     @staticmethod
     def compute_timeout_duration_s(df: pl.DataFrame) -> pl.Series:
@@ -207,7 +299,124 @@ class TVTimeoutValidation:
         )
         return result["timeout_duration_s"]
 
-    # ---------- sequence-position helpers ----------
+    @staticmethod
+    def _prep_cdnnba(memo, seasons: tuple[int, int] | None = None) -> pl.DataFrame:
+        """Prep cdnnba feed for classification. Accepts a polars memo
+        (``CDNNBAMemoPL`` subclasses ``pl.DataFrame``), a wrapper with
+        ``.data``, a raw polars DataFrame, or a pandas DataFrame.
+        Keeps ``qualifiers`` (mandatory signal) and ``timeActual``
+        (wall-clock, for diagnostic plots). ``seasons=None`` skips the
+        season filter entirely.
+        """
+        # MemoDataFramePL inherits from pl.DataFrame, so check pl FIRST —
+        # the ``hasattr(memo, "data")`` path is only for pandas-style memos.
+        if isinstance(memo, pl.DataFrame):
+            df = memo
+        elif hasattr(memo, "data"):
+            df = memo.data
+        else:
+            df = memo
+
+        # ``timeout_duration_s`` is persisted on the frame at load time
+        # (see ``CDNNBADatasetPL._inject_timeout_columns``). If the caller
+        # bypassed the loader and passed a raw parquet, the column won't
+        # be present and the cause classifier falls back to position-only.
+
+        wanted = [
+            "gameId",
+            "orderNumber",
+            "period",
+            "actionType",
+            "subType",
+            "seconds_remaining",
+            "season",
+            "season_type",
+            "personId",
+            "teamId",
+            "teamTricode",
+            "qualifiers",
+            "timeActual",
+            "timeout_duration_s",
+        ]
+
+        if isinstance(df, pl.DataFrame):
+            cols = [c for c in wanted if c in df.columns]
+            if seasons is None:
+                return df.select(cols)
+            return df.filter((pl.col("season") >= seasons[0]) & (pl.col("season") <= seasons[1])).select(cols)
+
+        # pandas path
+        cols = [c for c in wanted if c in df.columns]
+        if seasons is None:
+            sub = df[cols].copy()
+        else:
+            sub = df[(df["season"] >= seasons[0]) & (df["season"] <= seasons[1])][cols].copy()
+        for col in ("actionType", "subType"):
+            sub[col] = sub[col].astype("string").str.strip()
+        return pl.from_pandas(sub)
+
+    @staticmethod
+    def validate_against_cdnnba(
+        memo,
+        seasons: tuple[int, int] | None = None,
+        label: str = "cdnnba reclassification",
+    ) -> ValidationResult:
+        """Score ``classify_timeouts`` predictions against cdnnba's
+        ``qualifiers`` mandatory tag. Should be ≈ 1.0 since we predict
+        from the same signal. Provided for harness symmetry with the v3
+        validator.
+        """
+        cdn_pl = CDNNBATimeoutValidation._prep_cdnnba(memo, seasons)
+        classified = TVTimeoutValidation.classify_timeouts(cdn_pl, source="cdnnba", seasons=seasons)
+        return _score_generic(
+            classified,
+            CDNNBATimeoutValidation._cdnnba_gt_mask(),
+            seasons=seasons,
+            label=label,
+            action="timeout",
+        )
+
+    @staticmethod
+    def confusion_matrix_cdnnba(memo, seasons: tuple[int, int] | None = None) -> pd.DataFrame:
+        cdn_pl = CDNNBATimeoutValidation._prep_cdnnba(memo, seasons)
+        classified = TVTimeoutValidation.classify_timeouts(cdn_pl, source="cdnnba", seasons=seasons)
+        tos = (
+            classified.filter(pl.col("actionType").cast(pl.String).str.strip_chars() == "timeout")
+            .with_columns(
+                pl.col("qualifiers").cast(pl.String).str.contains("mandatory").alias("_is_mand_gt"),
+            )
+            .select(
+                pl.when(pl.col("_is_mand_gt")).then(pl.lit("mandatory")).otherwise(pl.lit("not_mandatory")).alias("gt"),
+                pl.col("timeout_role").alias("predicted_role"),
+            )
+            .to_pandas()
+        )
+        return pd.crosstab(tos["gt"], tos["predicted_role"], margins=True, margins_name="TOTAL")
+
+
+class TVTimeoutValidation(CDNNBATimeoutValidation, V3TimeoutValidation):
+    """Combined v3 + cdnnba — holds the *shared* dispatch and helper logic.
+
+    Multi-inherits from both source-specific parents
+    (``V3TimeoutValidation`` and ``CDNNBATimeoutValidation``). Source-specific
+    entry points (``validate_against_v3``, ``validate_against_cdnnba``,
+    ``compute_timeout_duration_s``, etc.) live upstream on the relevant
+    parent. This class owns:
+
+    - ``get_source_config`` — dispatches by ``Source`` literal.
+    - ``compute_cum_timeouts_period`` — generic cum count of all TOs.
+    - ``_compute_cum_mandatory_period`` — generic cum count of mandatory
+      TOs (dispatches by ``mandatory_signal`` string).
+    - ``classify_timeouts`` — the unified classifier that emits
+      ``timeout_role`` + ``timeout_cause`` + ``cumTimeoutsPeriod`` for
+      both eras.
+    """
+
+    @staticmethod
+    def get_source_config(source: Source) -> dict:
+        if source not in SOURCE_CONFIGS:
+            raise ValueError(f"unknown source {source!r}, expected one of {list(SOURCE_CONFIGS)}")
+        return SOURCE_CONFIGS[source]
 
     @staticmethod
     def compute_cum_timeouts_period(df: pl.DataFrame) -> pl.Series:
@@ -245,8 +454,6 @@ class TVTimeoutValidation:
         return df.select(
             is_mand.cast(pl.Int64).cum_sum().over(["gameId", "period"]).alias("_cum_mand"),
         )["_cum_mand"]
-
-    # ---------- classification ----------
 
     @staticmethod
     def classify_timeouts(
@@ -363,164 +570,9 @@ class TVTimeoutValidation:
 
         return pl.from_pandas(df_pd)
 
-    # ---------- v3-era validation ----------
-
-    @staticmethod
-    def _prep_v3(memo: NBAMemoDF, seasons: tuple[int, int] | None = None) -> pl.DataFrame:
-        v3 = memo.data
-        cols = [
-            "gameId",
-            "actionNumber",
-            "period",
-            "actionType",
-            "subType",
-            "seconds_remaining",
-            "season",
-            "season_type",
-            "personId",
-        ]
-        cols = [c for c in cols if c in v3.columns]
-        if seasons is None:
-            sub = v3[cols].copy()
-        else:
-            sub = v3[(v3["season"] >= seasons[0]) & (v3["season"] <= seasons[1])][cols].copy()
-        for col in ("actionType", "subType"):
-            sub[col] = sub[col].astype("string").str.strip()
-        return pl.from_pandas(sub)
-
-    @staticmethod
-    def validate_against_v3(
-        memo: NBAMemoDF,
-        seasons: tuple[int, int] | None = None,
-        label: str = "v3 reclassification",
-    ) -> ValidationResult:
-        """Score ``classify_timeouts`` predictions against v3 ground-truth
-        ``Official`` / ``Official TV`` subType labels.
-        """
-        v3_pl = TVTimeoutValidation._prep_v3(memo, seasons)
-        classified = TVTimeoutValidation.classify_timeouts(v3_pl, source="v3", seasons=seasons)
-        return _score_generic(classified, _v3_gt_mask(), seasons=seasons, label=label, action="Timeout")
-
-    @staticmethod
-    def confusion_matrix_v3(memo: NBAMemoDF, seasons: tuple[int, int] | None = None) -> pd.DataFrame:
-        v3_pl = TVTimeoutValidation._prep_v3(memo, seasons)
-        classified = TVTimeoutValidation.classify_timeouts(v3_pl, source="v3", seasons=seasons)
-        tos = (
-            classified.filter(pl.col("actionType").cast(pl.String).str.strip_chars() == "Timeout")
-            .select(
-                pl.col("subType").cast(pl.String).str.strip_chars().alias("gt_subType"),
-                pl.col("timeout_role").alias("predicted_role"),
-            )
-            .to_pandas()
-        )
-        return pd.crosstab(tos["gt_subType"], tos["predicted_role"], margins=True, margins_name="TOTAL")
-
-    # ---------- cdnnba-era validation ----------
-
-    @staticmethod
-    def _prep_cdnnba(memo, seasons: tuple[int, int] | None = None) -> pl.DataFrame:
-        """Prep cdnnba feed for classification. Accepts a polars memo
-        (``CDNNBAMemoPL`` subclasses ``pl.DataFrame``), a wrapper with
-        ``.data``, a raw polars DataFrame, or a pandas DataFrame.
-        Keeps ``qualifiers`` (mandatory signal) and ``timeActual``
-        (wall-clock, for diagnostic plots). ``seasons=None`` skips the
-        season filter entirely.
-        """
-        # MemoDataFramePL inherits from pl.DataFrame, so check pl FIRST —
-        # the ``hasattr(memo, "data")`` path is only for pandas-style memos.
-        if isinstance(memo, pl.DataFrame):
-            df = memo
-        elif hasattr(memo, "data"):
-            df = memo.data
-        else:
-            df = memo
-
-        # ``timeout_duration_s`` is persisted on the frame at load time
-        # (see ``CDNNBADatasetPL._inject_timeout_columns``). If the caller
-        # bypassed the loader and passed a raw parquet, the column won't
-        # be present and the cause classifier falls back to position-only.
-
-        wanted = [
-            "gameId",
-            "orderNumber",
-            "period",
-            "actionType",
-            "subType",
-            "seconds_remaining",
-            "season",
-            "season_type",
-            "personId",
-            "teamId",
-            "teamTricode",
-            "qualifiers",
-            "timeActual",
-            "timeout_duration_s",
-        ]
-
-        if isinstance(df, pl.DataFrame):
-            cols = [c for c in wanted if c in df.columns]
-            if seasons is None:
-                return df.select(cols)
-            return df.filter((pl.col("season") >= seasons[0]) & (pl.col("season") <= seasons[1])).select(cols)
-
-        # pandas path
-        cols = [c for c in wanted if c in df.columns]
-        if seasons is None:
-            sub = df[cols].copy()
-        else:
-            sub = df[(df["season"] >= seasons[0]) & (df["season"] <= seasons[1])][cols].copy()
-        for col in ("actionType", "subType"):
-            sub[col] = sub[col].astype("string").str.strip()
-        return pl.from_pandas(sub)
-
-    @staticmethod
-    def validate_against_cdnnba(
-        memo,
-        seasons: tuple[int, int] | None = None,
-        label: str = "cdnnba reclassification",
-    ) -> ValidationResult:
-        """Score ``classify_timeouts`` predictions against cdnnba's
-        ``qualifiers`` mandatory tag. Should be ≈ 1.0 since we predict
-        from the same signal. Provided for harness symmetry with the v3
-        validator.
-        """
-        cdn_pl = TVTimeoutValidation._prep_cdnnba(memo, seasons)
-        classified = TVTimeoutValidation.classify_timeouts(cdn_pl, source="cdnnba", seasons=seasons)
-        return _score_generic(classified, _cdnnba_gt_mask(), seasons=seasons, label=label, action="timeout")
-
-    # Back-compat shim for the older auto-claude notebook, which calls
-    # ``TVTimeoutValidation._score_row_by_row(classified, seasons=..., tolerance_s=0, label=...)``.
-    # ``tolerance_s`` is no longer meaningful (we don't do fuzzy clock matching anymore)
-    # — accepted and ignored.
-    @staticmethod
-    def _score_row_by_row(
-        classified: pl.DataFrame,
-        seasons: tuple[int, int] | None = None,
-        tolerance_s: int = 0,  # noqa: ARG004 — accepted for back-compat
-        label: str = "v3 reclassification",
-    ) -> ValidationResult:
-        return _score_generic(classified, _v3_gt_mask(), seasons=seasons, label=label, action="Timeout")
-
-    @staticmethod
-    def confusion_matrix_cdnnba(memo, seasons: tuple[int, int] | None = None) -> pd.DataFrame:
-        cdn_pl = TVTimeoutValidation._prep_cdnnba(memo, seasons)
-        classified = TVTimeoutValidation.classify_timeouts(cdn_pl, source="cdnnba", seasons=seasons)
-        tos = (
-            classified.filter(pl.col("actionType").cast(pl.String).str.strip_chars() == "timeout")
-            .with_columns(
-                pl.col("qualifiers").cast(pl.String).str.contains("mandatory").alias("_is_mand_gt"),
-            )
-            .select(
-                pl.when(pl.col("_is_mand_gt")).then(pl.lit("mandatory")).otherwise(pl.lit("not_mandatory")).alias("gt"),
-                pl.col("timeout_role").alias("predicted_role"),
-            )
-            .to_pandas()
-        )
-        return pd.crosstab(tos["gt"], tos["predicted_role"], margins=True, margins_name="TOTAL")
-
 
 # --------------------------------------------------------------------------- #
-#  Internals                                                                  #
+#  Module-level helpers                                                       #
 # --------------------------------------------------------------------------- #
 
 
@@ -542,26 +594,6 @@ def _detect_mandatory(df_pd: pd.DataFrame, signal: str) -> pd.Series:
             return q.map(lambda v: bool(v) and "mandatory" in v)  # type: ignore
         return q.astype("string").str.contains("mandatory", na=False)
     raise ValueError(f"unknown mandatory_signal {signal!r}")
-
-
-def _slot_by_position(sr: pd.Series, triggers: list[int]) -> pd.Series:
-    """For each row, the slot K = highest K such that ``triggers[K-1] ≥ sr``.
-
-    Rows above all triggers (pre-trigger absorbs) default to slot 1.
-    Triggers must be in descending sr order.
-    """
-    slot = pd.Series(1, index=sr.index, dtype="int8")
-    for K, t in enumerate(triggers, start=1):
-        slot = slot.where(sr > t, K)  # if sr <= t, this slot's trigger has fired → upgrade to K
-    return slot
-
-
-def _v3_gt_mask() -> pl.Expr:
-    return pl.col("subType").cast(pl.String).str.strip_chars().is_in(["Official", "Official TV"])
-
-
-def _cdnnba_gt_mask() -> pl.Expr:
-    return pl.col("qualifiers").cast(pl.String).str.contains("mandatory")
 
 
 def _score_generic(
