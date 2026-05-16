@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path as _Path
+
 import numpy as np
 import polars as pl
 from scipy import stats as sp_stats
 
 from nba_timeout_impact.datasets.memo_cdnnba_pl import CDNNBAMemoPL
 
-SUMMARY_PATH = "/home/Akseldkw/coding/nba/NBA-Timeout-Impact/Notebooks/studies/research-summary.md"
+SUMMARY_PATH = str(_Path(__file__).resolve().parents[2] / "Notebooks" / "applied-causality" / "research-summary.md")
 
 
 def sig(p: float) -> str:
@@ -238,6 +240,7 @@ def experiment_4(memo):
             "game_seconds_elapsed": df["game_seconds_elapsed"],
             "actionType": df["actionType"],
             "subType": df["subType"],
+            "timeout_cause": df["timeout_cause"],
             "teamId": df["teamId"],
             "streak": streak_s,
             "lead_change": lead_fwd,
@@ -249,17 +252,22 @@ def experiment_4(memo):
         (-pl.col("streak").sign() * pl.col("lead_change")).alias("recovery"),
     )
 
+    # Cause-based dispatch. Endogenous = strategic coach calls
+    # (coach_discretionary, mistagged_discretionary, challenge). Exogenous =
+    # the break would have happened anyway (tv_mandatory, coach_absorb) OR
+    # a natural stoppage.
     is_timeout = pl.col("actionType") == "timeout"
-    endo_sub = pl.col("subType").is_in(["full", "challenge"])
-    exo_sub = pl.col("subType") == "official_inferred"
+    cause = pl.col("timeout_cause")
+    endo_cause = cause.is_in(["coach_discretionary", "mistagged_discretionary", "challenge"])
+    exo_cause = cause.is_in(["tv_mandatory", "coach_absorb"])
     is_stop = pl.col("actionType") == "stoppage"
     suffering_called = ((pl.col("streak") > 0) & (pl.col("teamId") != pl.col("home_teamId"))) | (
         (pl.col("streak") < 0) & (pl.col("teamId") == pl.col("home_teamId"))
     )
     analysis = analysis.with_columns(
-        pl.when(is_timeout & endo_sub & suffering_called)
+        pl.when(is_timeout & endo_cause & suffering_called)
         .then(pl.lit("endogenous"))
-        .when(is_timeout & exo_sub)
+        .when(is_timeout & exo_cause)
         .then(pl.lit("exogenous"))
         .when(is_stop)
         .then(pl.lit("exogenous"))
@@ -329,6 +337,7 @@ def experiment_5(memo):
             "season_type": df["season_type"],
             "actionType": df["actionType"],
             "subType": df["subType"],
+            "timeout_cause": df["timeout_cause"],
             "teamId": df["teamId"],
             "streak": streak_s,
             "lead_change": lead_fwd,
@@ -340,17 +349,19 @@ def experiment_5(memo):
         (-pl.col("streak").sign() * pl.col("lead_change")).alias("recovery"),
     )
 
+    # Cause-based dispatch (see E1-E4 for details).
     is_timeout = pl.col("actionType") == "timeout"
-    endo_sub = pl.col("subType").is_in(["full", "challenge"])
-    exo_sub = pl.col("subType") == "official_inferred"
+    cause = pl.col("timeout_cause")
+    endo_cause = cause.is_in(["coach_discretionary", "mistagged_discretionary", "challenge"])
+    exo_cause = cause.is_in(["tv_mandatory", "coach_absorb"])
     is_stop = pl.col("actionType") == "stoppage"
     suffering_called = ((pl.col("streak") > 0) & (pl.col("teamId") != pl.col("home_teamId"))) | (
         (pl.col("streak") < 0) & (pl.col("teamId") == pl.col("home_teamId"))
     )
     analysis = analysis.with_columns(
-        pl.when(is_timeout & endo_sub & suffering_called)
+        pl.when(is_timeout & endo_cause & suffering_called)
         .then(pl.lit("endogenous"))
-        .when(is_timeout & exo_sub)
+        .when(is_timeout & exo_cause)
         .then(pl.lit("exogenous"))
         .when(is_stop)
         .then(pl.lit("exogenous"))
@@ -580,10 +591,10 @@ def main():
         f"\n## Data summary\n\n"
         f"- Spine rows: {memo.height:,}\n"
         f"- Unique games: {memo.cdnnba['gameId'].n_unique():,}\n"
-        f"- Coach timeouts (endogenous): "
-        f"{memo.cdnnba.filter(pl.col('subType').is_in(['full', 'challenge'])).height:,}\n"
-        f"- Inferred TV timeouts (exogenous): "
-        f"{memo.cdnnba.filter(pl.col('subType') == 'official_inferred').height:,}\n"
+        f"- Strategic coach timeouts (endogenous: discretionary + mistagged + challenge): "
+        f"{memo.f_timeout_endogenous.sum():,}\n"
+        f"- Forced TV timeouts (exogenous: tv_mandatory + coach_absorb): "
+        f"{memo.f_timeout_exogenous.sum():,}\n"
         f"- Total possessions: {memo.possessions.height:,}\n"
     )
 
