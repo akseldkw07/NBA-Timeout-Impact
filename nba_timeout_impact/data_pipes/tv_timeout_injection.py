@@ -290,12 +290,28 @@ class TVTimeoutValidation:
 
         sr = df_pd["seconds_remaining"]
         slot_table = PRE_2017_SLOTS if source == "v3" else POST_2017_SLOTS
+
+        # Slot identity = rank of this mandatory among period mandatories.
+        # i.e. ``slot_K_mandatory`` literally means "this is the K-th
+        # mandatory-qualified TO in the (gameId, period)." This matches the
+        # rulebook (slots fill in event order) and stays consistent with
+        # ``timeout_cause`` below. NOT a position-by-sr assignment — a TO at
+        # sr=300 that's the 2nd mandatory of the period is ``slot_2_mandatory``,
+        # NOT slot_1, even though sr=300 sits in slot 1's sr range.
+        cum_mand = TVTimeoutValidation._compute_cum_mandatory_period(
+            pl.from_pandas(df_pd), cfg["mandatory_signal"]
+        ).to_pandas()
+
         for periods_ok, triggers in slot_table:
             in_periods = df_pd["period"].isin(periods_ok)
-            slot = _slot_by_position(sr, triggers)
-            for K in range(1, len(triggers) + 1):
-                mask = is_mandatory & in_periods & (slot == K)
+            n_slots = len(triggers)
+            for K in range(1, n_slots + 1):
+                mask = is_mandatory & in_periods & (cum_mand == K)
                 df_pd.loc[mask, "timeout_role"] = f"slot_{K}_mandatory"
+            # Anomalous: more mandatory-qualified rows than slots in the period.
+            # Tag them with the last slot label (rare; cause logic flags absorb).
+            extras = is_mandatory & in_periods & (cum_mand > n_slots)
+            df_pd.loc[extras, "timeout_role"] = f"slot_{n_slots}_mandatory"
 
         # ------------------------------------------------------------------ #
         #  timeout_cause — rulebook-faithful taxonomy                         #
@@ -318,12 +334,7 @@ class TVTimeoutValidation:
         # true auto-fires, NOT the coach's decision.
         #
         # For causal analysis filter to ``timeout_cause == "tv_mandatory"``.
-
-        # Build cum-mandatory-per-period: the slot K assignment for each
-        # mandatory-qualified row (1 = first mandatory in period, etc).
-        cum_mand = TVTimeoutValidation._compute_cum_mandatory_period(
-            pl.from_pandas(df_pd), cfg["mandatory_signal"]
-        ).to_pandas()
+        # ``cum_mand`` (computed above for role assignment) is reused here.
 
         df_pd["timeout_cause"] = ""
         df_pd.loc[is_challenge, "timeout_cause"] = "challenge"
