@@ -83,7 +83,8 @@ class CDNNBADatasetPL(Enriched_DF_PL):
         pl.Series
     )  # String — tv_mandatory / coach_preempt / coach_absorb / coach_discretionary / challenge / ""
     timeout_duration_s: pl.Series  # Float64 — wall-clock seconds to game resumption; null on non-TO rows
-    cumTimeoutsPeriod: pl.Series  # Int64 — cumulative count of timeouts in (gameId, period) at this row
+    # ``cumTimeoutsPeriod`` is no longer persisted on this dataset — it's
+    # available via ``CDNNBAMemoPL.cum_timeouts_period(scope="all")``.
     season: pl.Series  # Int64
     shot_value: pl.Series  # Int64
     points_scored: pl.Series  # Int64
@@ -119,54 +120,85 @@ class CDNNBADatasetPL(Enriched_DF_PL):
         "is_clutch": pl.Boolean(),
     }
 
+    # Note: not annotated — validate_data treats type annotations as required
+    # data columns, and this is a class constant, not a dataset column.
+    INJECTION_COLUMNS = ("timeout_role", "timeout_cause", "timeout_duration_s")
+
     @classmethod
-    def load_from_parquet(cls, path: str | Path | None = None) -> "CDNNBADatasetPL":
-        """Load the enriched cdnnba parquet and inject the timeout
+    def load_from_parquet(
+        cls,
+        path: str | Path | None = None,
+        *,
+        reload_timeout_injection: bool = False,
+    ) -> "CDNNBADatasetPL":
+        """Load the enriched cdnnba parquet and attach the timeout
         classification columns (``timeout_role``, ``timeout_cause``,
         ``timeout_duration_s``).
 
-        Injection preserves row order — the classifier doesn't sort — so
-        the result is row-aligned with the raw parquet and the
-        ``CDNNBAMemoPL`` memo series.
+        Injection is cached to a sidecar parquet next to the main one
+        (``cdnnba_timeout_injection.parquet``). On load:
+          - If the cache exists AND height matches the input → use it.
+          - Else (or if ``reload_timeout_injection=True``) → rerun the
+            classifier and refresh the cache.
+
+        Injection preserves row order so the result is row-aligned with
+        the raw parquet and the ``CDNNBAMemoPL`` memo series.
         """
-        path = path or NBAConstants.NBA_DATA_DIR / "cdnnba_enriched.parquet"
+        path = Path(path) if path else NBAConstants.NBA_DATA_DIR / "cdnnba_enriched.parquet"
         df = pl.read_parquet(path)
-        df = cls._inject_timeout_columns(df)
+        cache_path = path.parent / "cdnnba_timeout_injection.parquet"
+        df = cls._inject_timeout_columns(df, cache_path=cache_path, reload=reload_timeout_injection)
         ret = cls(df)
         ret.validate_data()
         return ret
 
-    @staticmethod
-    def _inject_timeout_columns(df: pl.DataFrame) -> pl.DataFrame:
-        """Add ``timeout_role``, ``timeout_cause``, ``timeout_duration_s``,
-        and ``cumTimeoutsPeriod`` to a raw cdnnba frame.
+    @classmethod
+    def _inject_timeout_columns(
+        cls, df: pl.DataFrame, *, cache_path: Path | None = None, reload: bool = False
+    ) -> pl.DataFrame:
+        """Attach ``timeout_role``, ``timeout_cause``, and ``timeout_duration_s``
+        to a raw cdnnba frame.
 
-        Uses ``TVTimeoutValidation.compute_timeout_duration_s`` for the
-        wall-clock duration (sanity-clamped to ``[0, 600]`` seconds; nulls
-        outside that range). ``cumTimeoutsPeriod`` is the cumulative count
-        of timeout rows in each ``(gameId, period)`` (inclusive at each row)
-        and is what drives the rulebook-faithful cause classification.
+        Tries to read the 3-column cache parquet at ``cache_path`` first.
+        Falls back to running the classifier if:
+          - ``reload`` is True,
+          - the cache file doesn't exist, or
+          - the cache row count doesn't match ``df``.
 
-        Preserves row order so the result is row-aligned with the input.
-        Raises if the classifier ever returns a different height than the
-        input — alignment is a hard contract.
+        The classifier preserves input row order so the cache is row-aligned
+        with the main parquet. ``cumTimeoutsPeriod`` is no longer persisted
+        — use ``CDNNBAMemoPL.cum_timeouts_period(scope="all")`` to derive it.
         """
         # Local import to avoid a circular dependency at module load time.
         from nba_timeout_impact.data_pipes.tv_timeout_injection import TVTimeoutValidation
 
+        if cache_path is not None and cache_path.exists() and not reload:
+            cached = pl.read_parquet(cache_path)
+            if cached.height == df.height and all(c in cached.columns for c in cls.INJECTION_COLUMNS):
+                return df.with_columns(*[cached[c].alias(c) for c in cls.INJECTION_COLUMNS])
+            print(
+                f"timeout injection cache stale "
+                f"(cache height {cached.height:,} vs df {df.height:,} or missing cols) "
+                f"— regenerating."
+            )
+
         duration = TVTimeoutValidation.compute_timeout_duration_s(df)
-        df = df.with_columns(duration.alias("timeout_duration_s"))
-        classified = TVTimeoutValidation.classify_timeouts(df, source="cdnnba")
+        df_with_dur = df.with_columns(duration.alias("timeout_duration_s"))
+        classified = TVTimeoutValidation.classify_timeouts(df_with_dur, source="cdnnba")
         if classified.height != df.height:
             raise RuntimeError(
                 f"timeout classifier dropped rows ({classified.height} vs {df.height}) "
                 "— alignment broken; refusing to merge"
             )
-        return df.with_columns(
-            classified["timeout_role"].alias("timeout_role"),
-            classified["timeout_cause"].alias("timeout_cause"),
-            classified["cumTimeoutsPeriod"].alias("cumTimeoutsPeriod"),
+        injected = classified.select(
+            "timeout_role",
+            "timeout_cause",
+            df_with_dur["timeout_duration_s"].alias("timeout_duration_s"),
         )
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            injected.write_parquet(cache_path)
+        return df.with_columns(*[injected[c].alias(c) for c in cls.INJECTION_COLUMNS])
 
     # Post-2017 mandatory timeouts are charged to a team's count and logged
     # identically to coach-called TOs in the cdnnba feed — no row-level
