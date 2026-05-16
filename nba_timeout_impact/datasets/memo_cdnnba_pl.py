@@ -203,6 +203,75 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
         """Alias for lead_change_n_mins."""
         return self.lead_change_n_mins(n)
 
+    # region Timeout Re-classification
+
+    @memo_fn
+    def cum_timeouts_period(self, scope: t.Literal["all", "home", "away"] = "all") -> pl.Series:
+        """Cumulative count of FULL timeouts within each ``(gameId, period)``,
+        inclusive of the current row.
+
+        Excludes challenges (``subType == "challenge"``) — challenges don't
+        fill mandatory slots, so they don't count toward a team's TO budget
+        for absorb eligibility. Non-TO rows carry forward the count from the
+        most recent TO in the period.
+
+        ``scope``:
+          - ``"all"``: every full TO in the period.
+          - ``"home"``: only full TOs whose ``teamId`` matches the home team.
+          - ``"away"``: only full TOs whose ``teamId`` is the other team.
+
+        Used by ``TVTimeoutValidation.classify_timeouts`` to gate
+        ``coach_absorb`` on "this is the team's first full TO of the period."
+        """
+        df = self.cdnnba
+        is_full_to = (pl.col("actionType") == "timeout") & (pl.col("subType") == "full")
+
+        if scope == "all":
+            return df.select(
+                is_full_to.cast(pl.Int32).cum_sum().over(["gameId", "period"]).alias("cum_to_all"),
+            )["cum_to_all"]
+
+        full_df = pl.DataFrame._from_pydf(df._df).join(self.home_team_per_game, on="gameId", how="left")
+        is_home_team = (pl.col("teamId") == pl.col("home_teamId")).fill_null(False)
+        if scope == "home":
+            mask = is_full_to & is_home_team
+        else:
+            mask = is_full_to & ~is_home_team & (pl.col("teamId").fill_null(0) > 0)
+        return full_df.select(
+            mask.cast(pl.Int32).cum_sum().over(["gameId", "period"]).alias(f"cum_to_{scope}"),
+        )[f"cum_to_{scope}"]
+
+    @memo_series
+    def team_first_full_to_in_period(self) -> pl.Series:
+        """True iff this row is the first full TO by its team within
+        ``(gameId, period)``. Per-team cum count: a home TO at sr=550 and
+        an away TO at sr=400 are both True (each is first for its own team).
+
+        Used to gate ``coach_absorb`` — a row can only absorb a mandatory
+        slot if the team hasn't already taken a full TO this period.
+        """
+        df = pl.DataFrame._from_pydf(self.cdnnba._df)
+        is_full_to = (pl.col("actionType") == "timeout") & (pl.col("subType") == "full")
+        cum_team = is_full_to.cast(pl.Int32).cum_sum().over(["gameId", "period", "teamId"])
+        return df.select((is_full_to & (cum_team == 1)).alias("team_first_full_to"))["team_first_full_to"]
+
+    @memo_series
+    def slot_owner_team_default(self) -> pl.Series:
+        """Rulebook default slot-1 owner teamId, broadcast to every row.
+
+        Always = ``home_teamId`` (the rulebook says slot 1 auto-fires charge
+        home; slot 2 charges the other team). Compare against ``teamId`` on
+        ``tv_mandatory`` rows to flag rulebook violations. NOT used to gate
+        ``coach_absorb`` — empirically only ~50% of slot-1 absorbs are by
+        home, so gating on it would mis-label half of legitimate cases.
+        """
+        df = pl.DataFrame._from_pydf(self.cdnnba._df).join(self.home_team_per_game, on="gameId", how="left")
+        return df.select(pl.col("home_teamId").alias("slot_owner_default_home_teamId"))[
+            "slot_owner_default_home_teamId"
+        ]
+
+    # endregion
+
     # -- streaks --
 
     @memo_series

@@ -187,6 +187,7 @@ class V3TimeoutValidation:
             "season",
             "season_type",
             "personId",
+            "teamId",
         ]
         cols = [c for c in cols if c in v3.columns]
         if seasons is None:
@@ -337,6 +338,12 @@ class CDNNBATimeoutValidation:
             "qualifiers",
             "timeActual",
             "timeout_duration_s",
+            # ``scoreHome`` + ``points_scored`` let classify_timeouts derive
+            # home_teamId per game inline (for the slot-owner gate on
+            # coach_absorb). Not strictly required — the strict gate is
+            # silently skipped if these columns are absent.
+            "scoreHome",
+            "points_scored",
         ]
 
         if isinstance(df, pl.DataFrame):
@@ -457,7 +464,10 @@ class TVTimeoutValidation(CDNNBATimeoutValidation, V3TimeoutValidation):
 
     @staticmethod
     def classify_timeouts(
-        df: pl.DataFrame | pd.DataFrame, source: Source, seasons: tuple[int, int] | None = None
+        df: pl.DataFrame | pd.DataFrame,
+        source: Source,
+        seasons: tuple[int, int] | None = None,
+        k_absorb_buffer_s: int = 80,
     ) -> pl.DataFrame:
         """Add a ``timeout_role`` column to every row.
 
@@ -472,6 +482,15 @@ class TVTimeoutValidation(CDNNBATimeoutValidation, V3TimeoutValidation):
         absorbs) default to slot 1.
 
         ``seasons``: optional ``(lo, hi)`` inclusive filter on ``season``.
+
+        Official Rulebook (post 2020):
+
+        There must be two mandatory timeouts in each period.
+        If neither team has taken a timeout prior to 6:59 of the period, it shall be mandatory for the Official Scorer to take it at the first dead ball and charge it to the home team. If no subsequent timeouts are taken prior to 2:59, it shall be mandatory for the Official Scorer to take it and charge it to the team not previously charged.
+        The Official Scorer shall notify a team when it has been charged with a mandatory time-out.
+        Mandatory timeouts shall be 2:45 for local games and 3:15 for national games.  Any additional team timeouts in a period beyond those which are mandatory shall be 1:15.
+        No mandatory timeout may be charged during an official’s suspension-of-play.
+        EXCEPTION: Suspension-of-play for Infection Control. See Comments on the Rules—N
         """
         cfg = TVTimeoutValidation.get_source_config(source)
         df_pd = df.to_pandas() if isinstance(df, pl.DataFrame) else df.copy()
@@ -524,16 +543,29 @@ class TVTimeoutValidation(CDNNBATimeoutValidation, V3TimeoutValidation):
         #  timeout_cause — rulebook-faithful taxonomy                         #
         # ------------------------------------------------------------------ #
         # Categories:
-        #   ""                    — non-timeout
-        #   "challenge"           — coach challenge
-        #   "coach_discretionary" — coach TO that didn't fill a mandatory slot
-        #   "tv_mandatory"        — league-forced TV commercial break (the
-        #                           K-th mandatory in the period at sr ≤
-        #                           trigger_K — the trigger had already
-        #                           expired so this row IS the first dead
-        #                           ball / Official-TV firing).
-        #   "coach_absorb"        — coach TO that absorbed the K-th mandatory
-        #                           slot pre-emptively (sr > trigger_K).
+        #   ""                       — non-timeout
+        #   "challenge"              — coach challenge
+        #   "coach_discretionary"    — coach TO that didn't fill a mandatory slot
+        #                              (no league mandatory qualifier).
+        #   "tv_mandatory"           — league-forced TV commercial break (the
+        #                              K-th mandatory in the period at sr ≤
+        #                              trigger_K — the trigger had already
+        #                              expired so this row IS the first dead
+        #                              ball / Official-TV firing).
+        #   "coach_absorb"           — coach TO that absorbed the K-th mandatory
+        #                              slot pre-emptively (sr > trigger_K AND
+        #                              first full TO by this team in the period
+        #                              AND sr − trigger_K ≤ k_absorb_buffer_s).
+        #   "mistagged_discretionary"— league tagged the row "mandatory" but the
+        #                              row fails the absorb gates above —
+        #                              either the team had already taken a
+        #                              full TO this period (so they can't be
+        #                              absorbing again) or the TO is called
+        #                              too far before the trigger to be
+        #                              plausibly absorbing. The data feed
+        #                              over-tagged "mandatory"; we override
+        #                              to discretionary for downstream causal
+        #                              work but preserve the trail.
         #
         # CAUTION: ``tv_mandatory`` rows carry ``teamTricode`` / ``teamId``
         # per the NBA's structural charge-to-home (slot 1) / charge-to-road
@@ -543,24 +575,75 @@ class TVTimeoutValidation(CDNNBATimeoutValidation, V3TimeoutValidation):
         # For causal analysis filter to ``timeout_cause == "tv_mandatory"``.
         # ``cum_mand`` (computed above for role assignment) is reused here.
 
+        # Per-team cum count of full TOs in (gameId, period). The first row
+        # where a team takes a full TO has ``cum_team_to == 1`` for that team.
+        # Subsequent full TOs by the same team in the same period get 2, 3, ...
+        df_pd["_full_to_int"] = is_full_to.astype(int)
+        df_pd["_cum_team_to"] = df_pd.groupby(["gameId", "period", "teamId"])["_full_to_int"].cumsum()
+        is_first_team_full_to = (df_pd["_full_to_int"] > 0) & (df_pd["_cum_team_to"] == 1)
+
+        # Derive home_teamId per gameId by inspecting scoring rows: the team
+        # that scores when ``scoreHome`` increments is the home team. Used to
+        # gate ``coach_absorb`` on the rulebook's structural slot owner —
+        # slot 1 charges home, slot 2 charges the other team. If score
+        # columns are absent (e.g., v3 prep), the strict gate is a no-op.
+        if {"scoreHome", "teamId", "gameId"}.issubset(df_pd.columns):
+            scored = df_pd[df_pd["teamId"].fillna(0) > 0][["gameId", "teamId", "scoreHome"]].copy()
+            scored["_hd"] = scored.groupby("gameId")["scoreHome"].diff()
+            home_map = scored[scored["_hd"] > 0].drop_duplicates(subset=["gameId"]).set_index("gameId")["teamId"]
+            home_teamId_per_row = df_pd["gameId"].map(home_map)
+            is_home_to = (df_pd["teamId"] == home_teamId_per_row).fillna(False)
+            is_away_to = (
+                (df_pd["teamId"] != home_teamId_per_row) & home_teamId_per_row.notna() & (df_pd["teamId"].fillna(0) > 0)
+            ).fillna(False)
+            team_unknown = home_teamId_per_row.isna()
+        else:
+            # No score columns → can't derive home team; strict gate is a no-op.
+            is_home_to = pd.Series(False, index=df_pd.index)
+            is_away_to = pd.Series(False, index=df_pd.index)
+            team_unknown = pd.Series(True, index=df_pd.index)
+
         df_pd["timeout_cause"] = ""
         df_pd.loc[is_challenge, "timeout_cause"] = "challenge"
         df_pd.loc[is_full_to & ~is_mandatory, "timeout_cause"] = "coach_discretionary"
 
-        # Rulebook classification, identical for both sources: slot K = the
-        # K-th mandatory-qualified TO in the period; sr ≤ trigger_K means the
-        # trigger had already fired (tv_mandatory), else the coach absorbed
-        # the slot pre-emptively (coach_absorb).
+        # Rulebook classification:
+        #   slot K  = K-th mandatory-qualified TO in the period.
+        #   sr ≤ trigger_K                  → tv_mandatory (trigger had fired).
+        #   sr > trigger_K  AND
+        #     first team full TO AND
+        #     sr − trigger_K ≤ k_buf AND
+        #     team owns slot K (home for K=1, → coach_absorb (legit absorb).
+        #     other team for K=2)
+        #   else (pre_trigger but failing the absorb gates) → mistagged_discretionary.
         for periods_ok, triggers in slot_table:
             in_periods = df_pd["period"].isin(periods_ok)
             for K, trigger in enumerate(triggers, start=1):
+                # Structural slot-owner gate: slot 1 → home, slot 2 → other team.
+                # Slots beyond 2 (pre-2017 Q2/Q4 has 3) get no structural gate —
+                # the alternation pattern for the third trigger isn't in the
+                # post-2020 rulebook we have, so we don't impose one.
+                if K == 1:
+                    correct_team = is_home_to | team_unknown
+                elif K == 2:
+                    correct_team = is_away_to | team_unknown
+                else:
+                    correct_team = pd.Series(True, index=df_pd.index)
+
                 mask = is_full_to & is_mandatory & in_periods & (cum_mand == K)
                 df_pd.loc[mask & (sr <= trigger), "timeout_cause"] = "tv_mandatory"
-                df_pd.loc[mask & (sr > trigger), "timeout_cause"] = "coach_absorb"
+                pre_trigger = mask & (sr > trigger)
+                absorb_eligible = (
+                    pre_trigger & is_first_team_full_to & ((sr - trigger) <= k_absorb_buffer_s) & correct_team
+                )
+                df_pd.loc[absorb_eligible, "timeout_cause"] = "coach_absorb"
+                df_pd.loc[pre_trigger & ~absorb_eligible, "timeout_cause"] = "mistagged_discretionary"
             # Anomalous: more mandatory-qualified rows than slots in the period.
-            # Default to coach_absorb (rare; treat the extras as coach calls).
+            # By definition they can't absorb a slot that doesn't exist → mistagged.
             extras = is_full_to & is_mandatory & in_periods & (cum_mand > len(triggers))
-            df_pd.loc[extras, "timeout_cause"] = "coach_absorb"
+            df_pd.loc[extras, "timeout_cause"] = "mistagged_discretionary"
+
+        df_pd.drop(columns=["_full_to_int", "_cum_team_to"], inplace=True)
 
         # Also expose ``cumTimeoutsPeriod`` (cum of ALL TOs in period) on the
         # output — the loader persists it as a column for downstream use.

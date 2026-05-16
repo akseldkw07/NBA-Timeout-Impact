@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import typing as t
 from typing import Literal
 
-from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
 from kret_matplotlib.UTILS_Matplotlib import UTILS_Plotting as UKS_MPL
-import typing as t
 from kret_np_pd.single_ret_ndarray import SingleReturnArray
+from matplotlib.axes import Axes
+
 from nba_timeout_impact.data_pipes.tv_timeout_injection import ValidationResult
 
 # Pre-2017 trigger marks (Q2 / Q4): 8:59, 5:59, 2:59 → sr boundaries 540 / 360 / 180.
@@ -42,6 +43,7 @@ ROLE_COLORS = {
 CAUSE_COLORS = {
     "tv_mandatory": "tab:green",
     "coach_absorb": "tab:olive",
+    "mistagged_discretionary": "tab:orange",
     "coach_discretionary": "tab:gray",
     "challenge": "tab:purple",
 }
