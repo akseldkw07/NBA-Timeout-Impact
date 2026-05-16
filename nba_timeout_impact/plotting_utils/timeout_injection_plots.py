@@ -39,7 +39,6 @@ ROLE_COLORS = {
 # rather than by slot role.
 CAUSE_COLORS = {
     "tv_mandatory": "tab:green",
-    "coach_preempt": "tab:blue",
     "coach_absorb": "tab:olive",
     "coach_discretionary": "tab:gray",
     "challenge": "tab:purple",

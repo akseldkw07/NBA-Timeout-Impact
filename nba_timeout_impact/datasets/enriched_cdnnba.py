@@ -83,6 +83,7 @@ class CDNNBADatasetPL(Enriched_DF_PL):
         pl.Series
     )  # String — tv_mandatory / coach_preempt / coach_absorb / coach_discretionary / challenge / ""
     timeout_duration_s: pl.Series  # Float64 — wall-clock seconds to game resumption; null on non-TO rows
+    cumTimeoutsPeriod: pl.Series  # Int64 — cumulative count of timeouts in (gameId, period) at this row
     season: pl.Series  # Int64
     shot_value: pl.Series  # Int64
     points_scored: pl.Series  # Int64
@@ -137,12 +138,14 @@ class CDNNBADatasetPL(Enriched_DF_PL):
 
     @staticmethod
     def _inject_timeout_columns(df: pl.DataFrame) -> pl.DataFrame:
-        """Add ``timeout_role``, ``timeout_cause``, and ``timeout_duration_s``
-        to a raw cdnnba frame.
+        """Add ``timeout_role``, ``timeout_cause``, ``timeout_duration_s``,
+        and ``cumTimeoutsPeriod`` to a raw cdnnba frame.
 
         Uses ``TVTimeoutValidation.compute_timeout_duration_s`` for the
         wall-clock duration (sanity-clamped to ``[0, 600]`` seconds; nulls
-        outside that range).
+        outside that range). ``cumTimeoutsPeriod`` is the cumulative count
+        of timeout rows in each ``(gameId, period)`` (inclusive at each row)
+        and is what drives the rulebook-faithful cause classification.
 
         Preserves row order so the result is row-aligned with the input.
         Raises if the classifier ever returns a different height than the
@@ -162,6 +165,7 @@ class CDNNBADatasetPL(Enriched_DF_PL):
         return df.with_columns(
             classified["timeout_role"].alias("timeout_role"),
             classified["timeout_cause"].alias("timeout_cause"),
+            classified["cumTimeoutsPeriod"].alias("cumTimeoutsPeriod"),
         )
 
     # Post-2017 mandatory timeouts are charged to a team's count and logged

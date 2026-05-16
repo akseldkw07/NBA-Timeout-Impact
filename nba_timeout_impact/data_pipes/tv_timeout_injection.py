@@ -81,43 +81,31 @@ POST_2017_SLOTS = [
 
 
 # --------------------------------------------------------------------------- #
-#  Cause-classification thresholds (cdnnba only — v3 uses subType directly)   #
+#  Cause classification — rulebook-faithful approach                          #
 # --------------------------------------------------------------------------- #
 
-# Cutoffs below are rulebook-informed but rules-based — they hard-partition
-# the (sr, duration) plane into the cause categories. Rules-based is the
-# right call for a causal study (transparent, no fitted parameters, no
-# information leakage from the outcome). The empirical (sr, duration)
-# distribution IS bimodal at ~110s vs ~190s with a valley near 135-145s,
-# so the threshold values matter modestly but the buckets are unambiguous.
+# We classify a mandatory-qualified TO as ``tv_mandatory`` vs ``coach_absorb``
+# entirely from rulebook structure:
 #
-# TODO (only if causal estimates turn out sensitive to these cutoffs):
-#   - Replace the duration filter with a GMM/Otsu data-driven valley split.
-#   - Add a sequence-position signal (cum prior TOs in period) to
-#     disambiguate "first dead ball after trigger" (auto-fire) from "coach
-#     called at trigger" — the Nth TO at sr=415 has very different odds of
-#     being auto-fired than the 1st.
-# Run the sensitivity sweep before pursuing either.
-
-# How far below a trigger a mandatory must sit to count as a "true TV break"
-# auto-fire vs a coach-absorb far from the trigger. The first dead ball after
-# a trigger expires is usually within ~30s; we use 60s as a generous window.
-TV_BREAK_SR_BUFFER_S = 60
-
-# Wall-clock duration threshold (seconds). Per NBA rule 5, mandatory TV breaks
-# run 2:45 local / 3:15 national. Anything below ~150s is almost certainly a
-# coach-absorbed mandatory slot where no real TV break was taken.
-TV_BREAK_DURATION_MIN_S = 150
-
-# How close (in seconds) above a trigger a coach TO can sit and still be
-# classified as ``coach_preempt`` rather than ``coach_absorb``. Coach TOs
-# called within this window absorbed an imminent league-forced trigger.
-COACH_PREEMPT_SR_BUFFER_S = 30
+#   slot K = the K-th mandatory-qualified TO in the (gameId, period)
+#   trigger_K = the K-th rulebook trigger in descending sr (e.g., post-2017
+#               Q1-Q4 has triggers [420, 180] = 6:59, 2:59)
+#
+#   - If this TO's ``seconds_remaining`` ≤ trigger_K, the league trigger
+#     had already expired (or expired right at the TO) — this is the
+#     "first dead ball after the trigger" event → ``tv_mandatory``.
+#   - If sr > trigger_K, the coach called the TO BEFORE the league
+#     trigger fired, absorbing the slot pre-emptively → ``coach_absorb``.
+#
+# This makes only one assumption: that mandatory-qualified TOs fill slots
+# 1..N in event order. The cdnnba feed enforces this — slot 1 is always
+# the first mandatory-qualified row in the period, slot 2 the second.
+# No duration filter, no sr buffer, no preempt sub-bucket.
 
 # Sanity bounds for ``timeout_duration_s``. cdnnba's ``timeActual`` has rare
 # data glitches (rows where the wall-clock jumps backwards by a full day or
-# similar). Anything outside this range is set to null instead of being
-# allowed to pollute downstream filters.
+# similar). Anything outside this range is set to null in the persisted
+# ``timeout_duration_s`` column.
 DURATION_SANITY_MIN_S = 0
 DURATION_SANITY_MAX_S = 600  # 10 minutes — well above any real TO
 
@@ -219,6 +207,45 @@ class TVTimeoutValidation:
         )
         return result["timeout_duration_s"]
 
+    # ---------- sequence-position helpers ----------
+
+    @staticmethod
+    def compute_cum_timeouts_period(df: pl.DataFrame) -> pl.Series:
+        """Cumulative count of timeout rows within each ``(gameId, period)``,
+        evaluated AT each row (inclusive).
+
+        For a timeout row, this is its 1-indexed rank among all TOs in the
+        period. For a non-timeout row, this is the number of TOs that came
+        before this row in the period.
+
+        Caller's input must contain ``actionType``, ``gameId``, ``period``.
+        """
+        is_to = (pl.col("actionType") == "timeout").cast(pl.Int64)
+        return df.select(
+            is_to.cum_sum().over(["gameId", "period"]).alias("cumTimeoutsPeriod"),
+        )["cumTimeoutsPeriod"]
+
+    @staticmethod
+    def _compute_cum_mandatory_period(df: pl.DataFrame, mandatory_signal: str) -> pl.Series:
+        """Cumulative count of mandatory-qualified timeout rows within each
+        ``(gameId, period)``.
+
+        For a mandatory-qualified TO, this equals its slot K under the
+        rulebook (1 = first mandatory in period = slot 1, 2 = second =
+        slot 2, etc.).
+        """
+        if mandatory_signal == "personId_zero":
+            is_mand = (pl.col("actionType").is_in(["timeout", "Timeout"])) & (pl.col("personId").fill_null(-1) == 0)
+        elif mandatory_signal == "qualifier_mandatory":
+            is_mand = (pl.col("actionType") == "timeout") & pl.col("qualifiers").cast(pl.String).str.contains(
+                "mandatory"
+            ).fill_null(False)
+        else:
+            raise ValueError(f"unknown mandatory_signal {mandatory_signal!r}")
+        return df.select(
+            is_mand.cast(pl.Int64).cum_sum().over(["gameId", "period"]).alias("_cum_mand"),
+        )["_cum_mand"]
+
     # ---------- classification ----------
 
     @staticmethod
@@ -271,66 +298,57 @@ class TVTimeoutValidation:
                 df_pd.loc[mask, "timeout_role"] = f"slot_{K}_mandatory"
 
         # ------------------------------------------------------------------ #
-        #  timeout_cause — what *caused* the row, for downstream causal use  #
+        #  timeout_cause — rulebook-faithful taxonomy                         #
         # ------------------------------------------------------------------ #
         # Categories:
-        #   ""                  — non-timeout
-        #   "challenge"         — coach challenge
+        #   ""                    — non-timeout
+        #   "challenge"           — coach challenge
         #   "coach_discretionary" — coach TO that didn't fill a mandatory slot
-        #   "tv_mandatory"      — league-forced TV commercial break (EXOGENOUS).
-        #                         Caveat: cdnnba charges the slot to home (slot 1)
-        #                         or road (slot 2) by rule. The ``teamTricode`` /
-        #                         ``teamId`` on these rows reflects the rulebook
-        #                         charge, NOT the coach's decision — for true
-        #                         auto-fires no coach called this timeout.
-        #   "coach_preempt"     — coach TO at sr ∈ (trigger, trigger + 30] that
-        #                         absorbed a mandatory slot the league was
-        #                         about to fire. Near-exogenous timing (the
-        #                         trigger was imminent) but coach-initiated.
-        #   "coach_absorb"      — coach TO that absorbed a mandatory slot
-        #                         well before the trigger would have fired
-        #                         (or without a real TV break taken).
+        #   "tv_mandatory"        — league-forced TV commercial break (the
+        #                           K-th mandatory in the period at sr ≤
+        #                           trigger_K — the trigger had already
+        #                           expired so this row IS the first dead
+        #                           ball / Official-TV firing).
+        #   "coach_absorb"        — coach TO that absorbed the K-th mandatory
+        #                           slot pre-emptively (sr > trigger_K).
         #
-        # For causal analysis, filter to ``timeout_cause == "tv_mandatory"``.
-        # ``coach_preempt`` is a candidate sensitivity-analysis bucket.
+        # CAUTION: ``tv_mandatory`` rows carry ``teamTricode`` / ``teamId``
+        # per the NBA's structural charge-to-home (slot 1) / charge-to-road
+        # (slot 2) convention — the team label is a bookkeeping artifact for
+        # true auto-fires, NOT the coach's decision.
+        #
+        # For causal analysis filter to ``timeout_cause == "tv_mandatory"``.
+
+        # Build cum-mandatory-per-period: the slot K assignment for each
+        # mandatory-qualified row (1 = first mandatory in period, etc).
+        cum_mand = TVTimeoutValidation._compute_cum_mandatory_period(
+            pl.from_pandas(df_pd), cfg["mandatory_signal"]
+        ).to_pandas()
+
         df_pd["timeout_cause"] = ""
         df_pd.loc[is_challenge, "timeout_cause"] = "challenge"
         df_pd.loc[is_full_to & ~is_mandatory, "timeout_cause"] = "coach_discretionary"
 
-        if source == "v3":
-            # v3 directly labels Officials with personId == 0; no need for
-            # position/duration heuristics. Every mandatory row IS a TV break.
-            # (``coach_preempt`` doesn't apply to v3 since v3 separates Officials
-            # from coach TOs into distinct rows.)
-            df_pd.loc[is_full_to & is_mandatory, "timeout_cause"] = "tv_mandatory"
-        else:
-            # cdnnba: ``qualifiers`` merges auto-fires with coach-absorbed
-            # mandatories. Distinguish three sub-cases via sr position
-            # relative to the rulebook triggers + wall-clock duration:
-            #   (a) sr ∈ [trigger - 60, trigger] AND duration ≥ 150s → tv_mandatory
-            #   (b) sr ∈ (trigger, trigger + 30]                     → coach_preempt
-            #   (c) everything else mandatory                         → coach_absorb
-            near_trigger = pd.Series(False, index=df_pd.index)
-            preempt_zone = pd.Series(False, index=df_pd.index)
-            for periods_ok, triggers in slot_table:
-                in_periods = df_pd["period"].isin(periods_ok)
-                for t in triggers:
-                    near_trigger |= in_periods & (sr <= t) & (sr >= t - TV_BREAK_SR_BUFFER_S)
-                    preempt_zone |= in_periods & (sr > t) & (sr <= t + COACH_PREEMPT_SR_BUFFER_S)
+        # Rulebook classification, identical for both sources: slot K = the
+        # K-th mandatory-qualified TO in the period; sr ≤ trigger_K means the
+        # trigger had already fired (tv_mandatory), else the coach absorbed
+        # the slot pre-emptively (coach_absorb).
+        for periods_ok, triggers in slot_table:
+            in_periods = df_pd["period"].isin(periods_ok)
+            for K, trigger in enumerate(triggers, start=1):
+                mask = is_full_to & is_mandatory & in_periods & (cum_mand == K)
+                df_pd.loc[mask & (sr <= trigger), "timeout_cause"] = "tv_mandatory"
+                df_pd.loc[mask & (sr > trigger), "timeout_cause"] = "coach_absorb"
+            # Anomalous: more mandatory-qualified rows than slots in the period.
+            # Default to coach_absorb (rare; treat the extras as coach calls).
+            extras = is_full_to & is_mandatory & in_periods & (cum_mand > len(triggers))
+            df_pd.loc[extras, "timeout_cause"] = "coach_absorb"
 
-            if "timeout_duration_s" in df_pd.columns:
-                long_enough = df_pd["timeout_duration_s"].fillna(0) >= TV_BREAK_DURATION_MIN_S
-            else:
-                # No duration info available — fall back to position-only check.
-                # The user can re-prep with timeout_duration_s for stricter filtering.
-                long_enough = pd.Series(True, index=df_pd.index)
-
-            is_tv = is_full_to & is_mandatory & near_trigger & long_enough
-            is_preempt = is_full_to & is_mandatory & preempt_zone & ~is_tv
-            is_absorb = is_full_to & is_mandatory & ~is_tv & ~is_preempt
-            df_pd.loc[is_tv, "timeout_cause"] = "tv_mandatory"
-            df_pd.loc[is_preempt, "timeout_cause"] = "coach_preempt"
-            df_pd.loc[is_absorb, "timeout_cause"] = "coach_absorb"
+        # Also expose ``cumTimeoutsPeriod`` (cum of ALL TOs in period) on the
+        # output — the loader persists it as a column for downstream use.
+        df_pd["cumTimeoutsPeriod"] = (
+            TVTimeoutValidation.compute_cum_timeouts_period(pl.from_pandas(df_pd)).to_pandas().values
+        )
 
         return pl.from_pandas(df_pd)
 
