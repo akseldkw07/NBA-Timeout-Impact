@@ -316,29 +316,28 @@ estimator survives whatever selection-on-game produced the negative exogenous ga
 
 \subsection{Mechanism and moderators}
 
-Once we have a signal, we can ask where it comes from. All moderator analyses in this section use a
-between-group Welch test of treated vs control within each stratum -- the same estimator as \S4.1, not the
-paired matched-twin of \S4.2. The magnitudes below are therefore directly comparable to the near-zero
-between-group baseline and reflect the residual signal that survives the selection bias after stratifying,
-not the underlying causal effect size; we use the coarser estimator here to keep per-stratum sample sizes
-large enough for a clean test.
+Once we have a signal, we can ask where it comes from. To that effect, we conducted Welch two-sample
+$t$-tests, whose values we report below -- that is, $\Delta = \mu_{\text{treated}} - \mu_{\text{control}}$, the
+difference between the mean \texttt{recovery} of treated events and the mean \texttt{recovery} of control
+events within each stratum.
 
 Stratifying by the number of substitutions in a $\pm 30$s window around the event reveals that the
 endogenous effect is concentrated entirely in timeouts accompanied by personnel changes: with 0
-substitutions the endogenous-control gap is $-0.05$ (n.s.), with 1--2 substitutions it is $+0.10$ (n.s.),
-and with 3 or more substitutions it rises to $+0.21$ ($p < 0.001$). The exogenous penalty is
-correspondingly largest ($-0.39$, $p < 0.001$) when no subs occur and vanishes when many do. This directly
+substitutions the endogenous-control gap is $-0.06$ (n.s.), with 1--2 substitutions it is $+0.11$ (n.s.),
+and with 3 or more substitutions it rises to $+0.22$ ($p < 0.001$). The exogenous penalty is
+correspondingly largest ($-0.22$, $p < 0.05$) when no subs occur and vanishes when many do. This directly
 confirms the mechanism proposed by \citet{weimer2023causal}: the value of a timeout is mediated by
-substitutions rather than by the pause itself. TODO i don't really understand these values, they don't seem to align the results from the previous section
+substitutions rather than by the pause itself.
 
-Conditioning on team quality via season-long \texttt{NET\_RATING}, we find that the endogenous benefit is strongest in evenly matched
-games ($+0.23$ pts, $p < 0.05$) and washes out in lopsided matchups where the talent gap dominates the
+Conditioning on team quality via season-long \texttt{NET\_RATING}, we find that the endogenous benefit is
+strongest in evenly matched
+games ($+0.32$ pts, $p < 0.01$) and washes out in lopsided matchups where the talent gap dominates the
 trajectory. Finally, stratifying by the running team's in-game PPP we find that when the opponent is shooting
-unusually efficiently (PPP $\geq 1.30$), both effects are amplified and point in opposite directions:
-endogenous timeouts produce $+0.24$ pts of extra recovery ($p < 0.05$) while exogenous timeouts produce
-$-0.62$ pts ($p < 0.001$). This is the clearest evidence in our data of a genuine momentum effect  --  a coach
-timeout with substitutions disrupts a hot-shooting opponent, while a pure TV break effectively gives that
-opponent a rest and lets the run continue.
+unusually efficiently (PPP $\geq 1.30$), the two effects diverge in sign: endogenous timeouts produce
+$+0.20$ pts of extra recovery (n.s. at $n = 1{,}595$) while exogenous timeouts produce $-0.37$ pts
+($p < 0.05$). The asymmetry is extremely suggestive of a strategic coaching response to hot-shooting
+opponents, and it matches the conditional-momentum findings of \citet{qiu2025interrupt} that the value of a
+timeout is largest when the opponent is on a hot streak.
 
 \subsection{Summary}
 
@@ -357,7 +356,7 @@ absorbs the game-level selection into the baseline. The benefit is overwhelmingl
 opponents, which matches both coaching intuition and the conditional-momentum findings of
 \citet{qiu2025interrupt}.
 
-\section*{Future Work}\label{sec:future}
+\section{Future Work}\label{sec:future}
 
 Several extensions follow naturally from the present design:
 \begin{itemize}
@@ -366,7 +365,8 @@ Several extensions follow naturally from the present design:
 				to characterise between pair similarity (which tightens the estimate) and matched-pair
 				sample size (which determines its precision).
 		\item \textbf{Alternative outcome metrics.} Beyond $\texttt{recovery}$, we could measure the
-				streaking team's points-per-possession or points-per-minute over the forward window, or roll
+				streaking team's points-per-possession or points-per-minute over the forward window, as was done in
+				\citet{weimer2023causal}, or roll
 				either up into a win-probability impact via a calibrated WP model.
 		\item \textbf{Causal graphical model.} Distil the moderator findings into an explicit CGM
 				(substitutions $\to$ recovery; running-team PPP $\to$ recovery; \texttt{NET\_RATING} gap
@@ -375,13 +375,12 @@ Several extensions follow naturally from the present design:
 		\item \textbf{Streaking-team timeouts.} Re-run the analysis with the \emph{streaking} team as the
 				calling team. Do they substitute players at a higher rate than baseline, and what mechanism
 				would explain a positive or negative effect on the run they are already riding?
-		\item \textbf{Additional break types.} Official reviews, injury stoppages, and ejections all
-				introduce small exogenous perturbations to play. Do they show the same recovery pattern as
-				TV timeouts? Cross-checking against more natural experiments would strengthen the causal
-				claim.
+		\item \textbf{Generic Stoppage Evaluation.} It's interesting that the generic \texttt{stoppage} category
+				has a much higher point estimate ($+0.458$) than the league-forced \texttt{tv\_mandatory} category
+				($+0.361$). Could this be noise, or is there another causal mechanism at play here?
 \end{itemize}
 
-\section*{Further experimentation and code changes}
+\section{Further experimentation and code changes}
 
 A running log of follow-up items raised during the analysis. Items marked \textbf{[done]} have been
 folded into the current draft; the rest remain open.
