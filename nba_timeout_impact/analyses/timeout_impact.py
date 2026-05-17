@@ -254,9 +254,11 @@ def build_timeout_events(memo: CDNNBAMemoPL, window: int = 6) -> pl.DataFrame:
 
     # ---- 3. Join + determine calling team ----
     # is_endogenous = strategic coach call (coach_discretionary,
-    # mistagged_discretionary, challenge). tv_mandatory + coach_absorb are
+    # mistagged_discretionary). tv_mandatory + coach_absorb are
     # treated as exogenous — the league was firing the slot either way.
-    endo_causes = ["coach_discretionary", "mistagged_discretionary", "challenge"]
+    # ``challenge`` is held out of the endogenous aggregate (different
+    # decision class — review a specific call) and analyzed separately.
+    endo_causes = ["coach_discretionary", "mistagged_discretionary"]
     events = timeouts.join(p, on=["gameId", "possession_id"], how="inner")
     events = events.with_columns(
         pl.when(pl.col("timeout_cause").is_in(endo_causes))

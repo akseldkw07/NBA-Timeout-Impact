@@ -253,13 +253,16 @@ def experiment_4(memo):
     )
 
     # Cause-based dispatch. Endogenous = strategic coach calls
-    # (coach_discretionary, mistagged_discretionary, challenge). Exogenous =
+    # (coach_discretionary, mistagged_discretionary). Exogenous =
     # the break would have happened anyway (tv_mandatory, coach_absorb) OR
-    # a natural stoppage.
+    # a natural stoppage. Coach challenges are held out of the endogenous
+    # aggregate (different decision class) — tagged as their own group so
+    # they aren't bucketed as control.
     is_timeout = pl.col("actionType") == "timeout"
     cause = pl.col("timeout_cause")
-    endo_cause = cause.is_in(["coach_discretionary", "mistagged_discretionary", "challenge"])
+    endo_cause = cause.is_in(["coach_discretionary", "mistagged_discretionary"])
     exo_cause = cause.is_in(["tv_mandatory", "coach_absorb"])
+    challenge_cause = cause == "challenge"
     is_stop = pl.col("actionType") == "stoppage"
     suffering_called = ((pl.col("streak") > 0) & (pl.col("teamId") != pl.col("home_teamId"))) | (
         (pl.col("streak") < 0) & (pl.col("teamId") == pl.col("home_teamId"))
@@ -271,6 +274,8 @@ def experiment_4(memo):
         .then(pl.lit("exogenous"))
         .when(is_stop)
         .then(pl.lit("exogenous"))
+        .when(is_timeout & challenge_cause)
+        .then(pl.lit("challenge"))
         .otherwise(pl.lit("control"))
         .alias("group")
     )
@@ -352,8 +357,9 @@ def experiment_5(memo):
     # Cause-based dispatch (see E1-E4 for details).
     is_timeout = pl.col("actionType") == "timeout"
     cause = pl.col("timeout_cause")
-    endo_cause = cause.is_in(["coach_discretionary", "mistagged_discretionary", "challenge"])
+    endo_cause = cause.is_in(["coach_discretionary", "mistagged_discretionary"])
     exo_cause = cause.is_in(["tv_mandatory", "coach_absorb"])
+    challenge_cause = cause == "challenge"
     is_stop = pl.col("actionType") == "stoppage"
     suffering_called = ((pl.col("streak") > 0) & (pl.col("teamId") != pl.col("home_teamId"))) | (
         (pl.col("streak") < 0) & (pl.col("teamId") == pl.col("home_teamId"))
@@ -365,6 +371,8 @@ def experiment_5(memo):
         .then(pl.lit("exogenous"))
         .when(is_stop)
         .then(pl.lit("exogenous"))
+        .when(is_timeout & challenge_cause)
+        .then(pl.lit("challenge"))
         .otherwise(pl.lit("control"))
         .alias("group")
     )
@@ -591,7 +599,7 @@ def main():
         f"\n## Data summary\n\n"
         f"- Spine rows: {memo.height:,}\n"
         f"- Unique games: {memo.cdnnba['gameId'].n_unique():,}\n"
-        f"- Strategic coach timeouts (endogenous: discretionary + mistagged + challenge): "
+        f"- Strategic coach timeouts (endogenous: discretionary + mistagged): "
         f"{memo.f_timeout_endogenous.sum():,}\n"
         f"- Forced TV timeouts (exogenous: tv_mandatory + coach_absorb): "
         f"{memo.f_timeout_exogenous.sum():,}\n"
