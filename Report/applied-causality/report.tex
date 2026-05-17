@@ -161,13 +161,14 @@ categories, which are both coach-initiated. While coach\_challenge events are al
 them separate as a secondary treatment group because they have an additional mechanism (replay review) and a much
 smaller sample size.
 
-\textbf{Exogenous} events are the union of the tv\_mandatory and coach\_absorb categories. The similarity
-in their timing and magnitude of effect (as we will see in \S\ref{sec:matched-twin-results}) suggests that
-they are both driven by the same underlying mechanism -- the pause itself -- and that the coach\_absorb
-events are effectively a subset of the broader exogenous population.
+\textbf{Exogenous} events are the union of the tv\_mandatory and coach\_absorb categories together with
+natural game stoppages (out-of-bounds, injuries, blood rule, equipment).
+All three share the same ``pause in play'' mechanism with no coach selection on game state; only the
+trigger differs.
 
-\textbf{Control} events are dead-ball moments with no timeout occurring during an active scoring run; to
-avoid over-representing long runs, we subsample at most one control per run segment.
+\textbf{Control} events are \emph{play-continuing} moments during an active scoring run -- rows where
+neither a timeout nor a stoppage occurred, so play proceeded normally. We sample at most one control per
+run segment to avoid over-representing long runs.
 
 NBA rules allow substitutions and strategy huddles during \emph{any} timeout (full, short, mandatory TV,
 challenge, injury), so the opportunity to alter play after the break is identical in all cases. What
@@ -283,8 +284,7 @@ match for multiple). The paired mean differences are \textbf{$+0.408$ pts for en
 ($t = 26.5$, $p < 0.0001$) and \textbf{$+0.405$ pts for exogenous timeouts} ($t = 13.2$, $p < 0.0001$). Note
 that these values are extremely similar. Breaking the treated population into the six fine
 subtypes of \S\ref{sec:timeout-classification} reveals the same sign and roughly the same magnitude
-everywhere: \texttt{tv\_mandatory} $+0.361$ *** ($n = 879$), generic \texttt{stoppage} $+0.458$ *** TODO I
-thought that stoppages were control events?
+everywhere: \texttt{tv\_mandatory} $+0.361$ *** ($n = 879$), generic \texttt{stoppage} $+0.458$ ***
 ($n = 1{,}752$), \texttt{coach\_absorb} $+0.340$ *** ($n = 849$), \texttt{coach\_discretionary} $+0.429$ ***
 ($n = 2{,}119$), \texttt{mistagged\_discretionary} $+0.400$ *** ($n = 5{,}355$), and \texttt{coach\_challenge}
 $+0.469$ ** ($n = 98$). The consistency across six structurally distinct event types -- league-forced auto-
@@ -298,26 +298,21 @@ runs (low-recovery games), so comparing the endogenous mean to a global control 
 into the baseline and erases the signal. The matched twin lives in the same game, same period, with the
 same streak sign and a near-identical clock position and score margin, so any game-level confounder (team
 quality, pace, coaching style, overall momentum direction) is differenced out at the pair level and the
-estimator survives whatever selection-on-game produced the negative exogenous gap in \S4.1. A coarser
-within-game \emph{mean} comparison -- in which each treated event is compared against the average
-$\texttt{recovery}$ of all controls in the same game, rather than against a single distance-minimising twin
--- gives a consistent $+0.35$ pts effect for endogenous timeouts but shrinks the exogenous effect to near
-zero. The drop suggests that tight clock-position matching is more load-bearing for exogenous events (whose
-triggers are themselves clock-locked) than for endogenous ones.
+estimator survives whatever selection-on-game produced the negative exogenous gap in \S4.1.
 
-The $+0.714$ pair difference on coach challenges is large in magnitude but rests on $n = 35$ matched pairs
-and reaches only $p < 0.05$. Two structural factors limit how much weight we can put on this row. First,
-the cdnnba feed only emits \texttt{instantreplay} outcome rows for the 2020 and 2021 seasons; challenges
-from 2022 onward have no recorded \texttt{overturned} / \texttt{stands} label, so we cannot examine the
-broader population. Second, even when we restrict to those two seasons and try to split the matched
-challenges by replay outcome (E15), only 19 of the 35 challenges line up with a replay row within our
-60-second window and -- coincidentally or otherwise -- all 19 are \texttt{overturned}, leaving zero failed
-challenges in the matched sample. The broader 2020--2021 challenge population (1{,}446 challenges from
-\texttt{instantreplay/challenge} rows, of which 688 are overturned and 758 fail) shows a near-even
-success/failure split, so the all-overturned matched sample is a sampling artifact rather than a true
-asymmetry. We therefore cannot test the natural mechanistic hypothesis -- that successful challenges drive
-the entire coach\_challenge effect -- with the present matching protocol; we flag it as future work
-(\S\ref{sec:future}) for a redesigned challenge-specific match that loosens the per-period clock constraint.
+% The $+0.714$ pair difference on coach challenges is large in magnitude but rests on $n = 35$ matched pairs
+% and reaches only $p < 0.05$. Two structural factors limit how much weight we can put on this row. First,
+% the cdnnba feed only emits \texttt{instantreplay} outcome rows for the 2020 and 2021 seasons; challenges
+% from 2022 onward have no recorded \texttt{overturned} / \texttt{stands} label, so we cannot examine the
+% broader population. Second, even when we restrict to those two seasons and try to split the matched
+% challenges by replay outcome (E15), only 19 of the 35 challenges line up with a replay row within our
+% 60-second window and -- coincidentally or otherwise -- all 19 are \texttt{overturned}, leaving zero failed
+% challenges in the matched sample. The broader 2020--2021 challenge population (1{,}446 challenges from
+% \texttt{instantreplay/challenge} rows, of which 688 are overturned and 758 fail) shows a near-even
+% success/failure split, so the all-overturned matched sample is a sampling artifact rather than a true
+% asymmetry. We therefore cannot test the natural mechanistic hypothesis -- that successful challenges drive
+% the entire coach\_challenge effect -- with the present matching protocol; we flag it as future work
+% (\S\ref{sec:future}) for a redesigned challenge-specific match that loosens the per-period clock constraint.
 
 \subsection{Mechanism and moderators}
 
@@ -334,8 +329,9 @@ substitutions the endogenous-control gap is $-0.05$ (n.s.), with 1--2 substituti
 and with 3 or more substitutions it rises to $+0.21$ ($p < 0.001$). The exogenous penalty is
 correspondingly largest ($-0.39$, $p < 0.001$) when no subs occur and vanishes when many do. This directly
 confirms the mechanism proposed by \citet{weimer2023causal}: the value of a timeout is mediated by
-substitutions rather than by the pause itself. Conditioning on team quality
-via season-long \texttt{NET\_RATING}, we find that the endogenous benefit is strongest in evenly matched
+substitutions rather than by the pause itself. TODO i don't really understand these values, they don't seem to align the results from the previous section
+
+Conditioning on team quality via season-long \texttt{NET\_RATING}, we find that the endogenous benefit is strongest in evenly matched
 games ($+0.23$ pts, $p < 0.05$) and washes out in lopsided matchups where the talent gap dominates the
 trajectory. Finally, stratifying by the running team's in-game PPP we find that when the opponent is shooting
 unusually efficiently (PPP $\geq 1.30$), both effects are amplified and point in opposite directions:
