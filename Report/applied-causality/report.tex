@@ -98,7 +98,8 @@ opposing team is scoring at an unusually high rate, any subsequent slowdown refl
 scoring to return to its average rather than a causal effect of the stoppage itself.
 
 \citet{gibbs2021causal} revisit the same question but restrict attention to the specific scenario of an
-opposing team's scoring run, where the strategic stakes of the timeout decision are highest. Working within
+opposing team's scoring run, where the strategic stakes of the timeout decision are highest <- TODO what does
+this mean?? . Working within
 the Rubin causal model, they carefully define units under SUTVA and introduce an interpretable outcome based
 on the score difference to capture broad changes in scoring dynamics. In contrast to \citet{assis2020stop},
 they find that calling a timeout during an opposing run is \emph{slightly disadvantageous} on average, and
@@ -112,7 +113,7 @@ respect to in-game momentum. Using TV timeouts as a natural experiment that mimi
 pause, they report an \emph{11.2\% decline} in the scoring rate of the team carrying momentum immediately
 after a TV timeout, and they show this effect is robust to run size, substitutions, and game context. This
 stands in sharp contrast to the null result of \citet{assis2020stop} and the mildly negative result of
-\citet{gibbs2021causal}: by removing coach selection bias entirely, \citet{weimer2023causal} argue that
+\citet{gibbs2021causal}; by removing coach selection bias entirely, \citet{weimer2023causal} argue that
 team-level momentum genuinely exists and that pauses in play do interrupt it.
 
 \citet{qiu2025interrupt} approach the problem from a sports-psychology perspective rather than a
@@ -132,45 +133,54 @@ between the exogenous-timeout evidence for a real momentum effect and the select
 \subsection{Data}
 
 We build our analysis on the cdnnba enriched play-by-play data for the 2020--2025 NBA seasons (regular
-season and playoffs), loaded via our own \texttt{CDNNBAMemoPL.load\_all()} pipeline. After cleaning, the
-spine contains 4{,}168{,}786 play-by-play rows spanning 7{,}457 unique games and 1{,}480{,}697 possessions,
-of which 82{,}197 are coach-logged timeouts (\texttt{actionType == timeout}, \texttt{subType} in
-\{\texttt{full}, \texttt{challenge}\}). Reclassifying those rows by causal trigger
-(\S\ref{sec:timeout-classification}) yields 13{,}172 league-forced \emph{tv\_mandatory} timeouts, 6{,}805
-\emph{coach\_absorb} timeouts that satisfy an imminent mandatory slot, 23{,}747
-\emph{coach\_discretionary} pure coach calls, 36{,}918 \emph{mistagged\_discretionary} rows (qualifier-tagged
-as mandatory by the feed but failing the rulebook's slot-owner / first-team-TO / proximity gates), and
-1{,}555 coach challenges.
+season and playoffs). After cleaning, the
+dataset contains 4{,}168{,}786 play-by-play rows spanning 7{,}457 unique games and 1{,}480{,}697 possessions,
+of which 82{,}197 are coach-logged timeouts.
+
+\subsection{Mandatory Timeout Rule Changes}
+
+For to the 2017-18 season, the NBA Board of Governors overhauled the timeout format
+\citep{nba2017bog,nba2017timeout}. Moving forward, there would be 2 mandatory TV timeouts per period,
+triggered at the 6:59 and 2:59 marks. In addition, they changed the rules to deduct the first unused
+mandatory timeout from the home team, and the second from the visiting team. \textit{Example}: If neither
+team has called a timeout by the 6:59 mark, the official scorer calls one and charges it to the home team; if
+no subsequent timeout is taken before the 2:59 mark, the scorer calls one and charges it to the visiting team.
+
+This rulebook change has two implications for our analysis. First, it changes the settings of our analysis
+from those conducted by \citet{weimer2023causal}, which used data from 2013--2017. Secondly, it creates a new
+category of \textit{pseudo-mandatory} timeouts: coach calls that occur in the seconds leading up to their imminent
+mandatory trigger.
 
 \subsection{Timeout classification}\label{sec:timeout-classification}
 
-We partition stoppage events into three mutually exclusive treatment groups according to whether the
-\emph{coach} made a strategic choice to take the break. \textbf{Exogenous} events are stoppages that would
-have occurred regardless of any coach decision: cdnnba \emph{tv\_mandatory} rows (the league-forced
-commercial breaks at roughly the 6:59 and 2:59 marks), \emph{coach\_absorb} rows (a coach call within
-		$\sim$80 seconds of a pending mandatory trigger, where the slot was queued to auto-fire anyway and the coach
-is only choosing the moment, not the fact of the timeout), and natural game pauses (\texttt{actionType ==
-stoppage} -- out-of-bounds, injuries, blood rule, equipment, etc.). \textbf{Endogenous} events are
-strategic coach calls -- \emph{coach\_discretionary} (no mandatory tag at all),
-\emph{mistagged\_discretionary} (qualifier-tagged ``mandatory'' but failing the rulebook gates below), and
-coach challenges -- restricted to those called by the team being scored against (the \emph{suffering team}).
+Of those 82{,}197 timeouts, the composition is as follows:
+
+\begin{itemize}
+		\item 13{,}172 \texttt{tv\_mandatory} rows (league-forced commercial breaks at roughly the 6:59 and 2:59
+				marks of each period). These serve as our primary `exogenous' treatment group.
+		\item 6{,}805 \texttt{coach\_absorb} rows. These are coach called timeouts that occur right before (within
+				80 seconds) a mandatory timeout would have triggered.
+		\item 23{,}747 \texttt{coach\_discretionary} rows. These are coach called timeouts
+		\item 36{,}918 \texttt{mistagged\_discretionary} rows. These are coach called timeouts that were tagged as
+				``mandatory'' by the feed, but \textbf{we reclassified} as discretionary in nature.
+		\item 1{,}555 \texttt{coach\_challenge} rows. These are coach challenges, which are a special type of timeout that
+				allow for replay review and potential overturning of the preceding call.
+\end{itemize}
+
+Our \textbf{endogenous} events are the union of the coach\_discretionary and mistagged\_discretionary
+categories, which are both coach-initiated. While coach\_challenge events are also coach-initiated, we keep
+them separate as a secondary treatment group because they have an additional mechanism (replay review) and a much
+smaller sample size.
+
+Our \textbf{exogenous} events are the union of the tv\_mandatory and coach\_absorb categories. The similarity
+in their timing and magnitude of effect (as we will see in \S\ref{sec:matched-twin-results}) suggests that
+they are both driven by the same underlying mechanism -- the pause itself -- and that the coach\_absorb
+events are effectively a subset of the broader exogenous population.
+
 \textbf{Control} events are dead-ball moments with no timeout occurring during an active scoring run; to
 avoid over-representing long runs, we subsample at most one control per run segment.
 
-The cdnnba feed directly tags mandatory timeouts in its \texttt{qualifiers} column (string contains
-``mandatory''), so unlike prior pipelines we do not need to infer the TV-timeout slot from clock position
-alone. A qualifier-tagged row becomes \emph{tv\_mandatory} only when (i) \texttt{seconds\_remaining} $\leq$
-the period's slot-$K$ trigger and (ii) the charged \texttt{teamId} matches the rulebook's structural slot
-owner -- home for slot 1, the opposing team for slot 2. Rows passing only the clock gate (sr $>$ trigger)
-become \emph{coach\_absorb} if the coach was within an 80-second buffer of the trigger \emph{and} the row is
-that team's first full TO of the period; otherwise the row is reclassified \emph{mistagged\_discretionary}
-(the feed billed it as mandatory but it is structurally a coach call). The 80-second buffer is rulebook-
-informed but rules-based; we picked it from the empirical knee in the (sr $-$ trigger) distribution and
-sensitivity to it is modest in the range 60--180s. To validate this procedure we ran the analogous detector
-on the 2013--2016 nbastatsv3 feed -- which carries explicit \texttt{Official} / \texttt{Official TV} ground
-truth -- and obtained \textbf{F1 $= 0.933$} (precision $0.876$, recall $0.999$) against that label.
-
-The endogenous/exogenous distinction is causal rather than mechanical. NBA rules allow substitutions and
+NBA rules allow substitutions and
 strategy huddles during \emph{any} timeout (full, short, or mandatory TV), so the opportunity to alter play
 after the break is identical in both cases. What separates the two types is how the trigger is selected:
 coaches initiate endogenous timeouts in response to game state (introducing selection bias on adverse
@@ -396,6 +406,7 @@ A running log of follow-up items raised during the analysis. Items marked \textb
 folded into the current draft; the rest remain open.
 
 \begin{itemize}
+		\item More photos
 		\item \textbf{[done]} Coach challenge split by successful / failed outcome (E15). Implemented in
 				\texttt{run\_experiments\_v2.experiment\_15} and invoked from the notebook;
 				results discussed in \S\ref{sec:matched-twin-results}. Matched-sample size collapses to 7
