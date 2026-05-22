@@ -155,18 +155,24 @@ def build_rich_analysis(memo, run_size: int = 6, minutes: float = 3.0) -> pl.Dat
     )
     analysis = analysis.with_columns(subtype_fine_expr.alias("subtype_fine"))
 
-    # Coarse group (endogenous / exogenous / control).
+    # Coarse group (endogenous / exogenous / challenge / control).
     # Endogenous = coach chose a *strategic* TO — coach_discretionary,
-    #              mistagged_discretionary, coach_challenge.
+    #              mistagged_discretionary.
     # Exogenous  = the break would have happened regardless of coach choice —
     #              tv_mandatory (auto-fire), coach_absorb (slot was about to
     #              fire; coach just chose the moment), or stoppage.
+    # Challenge  = coach_challenge events. Held out from the endogenous
+    #              aggregate (different decision class — review a specific
+    #              call, not a strategic huddle) and analyzed separately
+    #              in E15. Tagged as its own group so it isn't bucketed as
+    #              control.
     # Control    = everything else (filtered later to one event per run segment).
     # NOTE: coach_absorb sits in exogenous because the slot was queued to
     # auto-fire within ~80s anyway — the coach isn't gaining strategic value
     # by calling it, just picking the moment.
-    endo_sub = pl.col("subtype_fine").is_in(["coach_discretionary", "mistagged_discretionary", "coach_challenge"])
+    endo_sub = pl.col("subtype_fine").is_in(["coach_discretionary", "mistagged_discretionary"])
     exo_sub = pl.col("subtype_fine").is_in(["tv_mandatory", "coach_absorb", "stoppage"])
+    challenge_sub = pl.col("subtype_fine") == "coach_challenge"
     # For endogenous, also verify the calling team is the suffering team —
     # the team being scored against is the one with strategic motive to break
     # the run. A TO called by the running team is a different kind of event.
@@ -178,6 +184,8 @@ def build_rich_analysis(memo, run_size: int = 6, minutes: float = 3.0) -> pl.Dat
         .then(pl.lit("endogenous"))
         .when(exo_sub)
         .then(pl.lit("exogenous"))
+        .when(challenge_sub)
+        .then(pl.lit("challenge"))
         .otherwise(pl.lit("control"))
         .alias("group")
     )

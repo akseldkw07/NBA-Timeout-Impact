@@ -904,3 +904,386 @@ the calling team's normal rhythm?'
   this particular game, does the timeout work differently?
 - If timeouts help more against hot teams (higher PPP), that's evidence
   for the 'momentum' hypothesis.
+
+---
+
+# Extended experiments (E9-E14)
+
+*These experiments address the extended TODO.md variable list: timeout subtype, game situation, team characteristics, PPP baselines, substitutions, and a proper matched-twin causal estimate.*
+
+## Experiment 9: Matched-twin within-game causal analysis
+
+For each treated event (coach timeout or TV timeout), we look for a
+control event **in the same game** that also has a run underway and
+matches on:
+
+- same period
+- same sign of `streak` (so it's a run against the same team)
+- `|Δ streak|` ≤ 2 (similar run magnitude)
+- `|Δ seconds_remaining|` ≤ 120s (similar game-clock position in period)
+- `|Δ suffering_margin|` ≤ 3 (similar score state)
+
+When multiple controls match, we pick the one with the smallest combined
+distance. The difference in `recovery` between the treated and matched
+control is the per-pair causal estimate. Paired t-test aggregates them.
+
+#### E9 table: matched-twin causal estimates (coarse groups)
+
+| group | matched_n | treated μ | matched ctrl μ | pair diff | t | p | sig |
+|---|---|---|---|---|---|---|---|
+| endogenous | 7,474 | +0.350 | -0.058 | +0.4082 | 26.474 | 0.0000 | *** |
+| exogenous | 3,480 | +0.198 | -0.207 | +0.4049 | 13.155 | 0.0000 | *** |
+
+#### E9 table: matched-twin causal estimates (fine subtypes)
+
+| subtype | matched_n | treated μ | matched ctrl μ | pair diff | t | p | sig |
+|---|---|---|---|---|---|---|---|
+| tv_mandatory | 879 | +0.259 | -0.101 | +0.3606 | 6.030 | 0.0000 | *** |
+| stoppage | 1,752 | +0.059 | -0.399 | +0.4583 | 9.367 | 0.0000 | *** |
+| coach_absorb | 849 | +0.422 | +0.081 | +0.3404 | 7.853 | 0.0000 | *** |
+| coach_discretionary | 2,119 | +0.352 | -0.076 | +0.4285 | 15.594 | 0.0000 | *** |
+| mistagged_discretionary | 5,355 | +0.349 | -0.051 | +0.4002 | 21.547 | 0.0000 | *** |
+| coach_challenge | 98 | -0.429 | -0.898 | +0.4694 | 2.733 | 0.0075 | ** |
+
+**Takeaways:**
+- Matched-twin is the strongest within-game control possible: each
+  treated event is paired with a near-identical non-timeout moment in the
+  same game.
+- Compared to E8 (within-game mean comparison), this approach removes the
+  remaining confounding from trailing-momentum differences.
+
+## Experiment 10: Fine-grained timeout subtype breakdown
+
+Split the endo/exo bins into their constituent subtypes and compare
+each against the control baseline.
+
+#### E10 table: recovery by fine subtype (run≥6, 3-min)
+
+| subtype | n | μ | σ | ctrl μ | Δ vs ctrl | p | sig |
+|---|---|---|---|---|---|---|---|
+| tv_mandatory | 1,486 | +0.283 | 4.269 | +0.371 | -0.087 | 0.4387 | n.s. |
+| stoppage | 3,793 | +0.125 | 4.371 | +0.371 | -0.246 | 0.0009 | *** |
+| coach_absorb | 1,563 | +0.460 | 4.235 | +0.371 | +0.089 | 0.4142 | n.s. |
+| coach_discretionary | 4,694 | +0.432 | 3.942 | +0.371 | +0.062 | 0.3169 | n.s. |
+| mistagged_discretionary | 11,543 | +0.430 | 4.287 | +0.371 | +0.059 | 0.1898 | n.s. |
+| coach_challenge | 208 | -0.596 | 4.040 | +0.371 | -0.967 | 0.0007 | *** |
+
+**Takeaways:**
+- `tv_mandatory` are league-forced commercial breaks — strictly
+  exogenous (coach didn't choose, team owns slot per rulebook).
+- `coach_absorb` is the much rarer endogenous TO that satisfies a
+  pending mandatory slot (called within ~80s of the trigger).
+- `coach_discretionary` are pure coach calls — no mandatory tag.
+- `mistagged_discretionary` were league-tagged "mandatory" but failed
+  the rulebook's slot-owner / first-team-TO / proximity gates. We
+  treat them as endogenous: the coach chose to call them.
+- `coach_challenge` is a structurally distinct coach decision.
+- `stoppage` events (out-of-bounds, injury, etc.) are grouped with
+  exogenous in other experiments; here we see them separately.
+
+## Experiment 11: Time-of-game conditioning
+
+Does the timeout effect scale with game phase? Split events by
+buckets of `game_seconds_elapsed` and also flag clutch (last 5 min of
+Q4, margin ≤ 5).
+
+#### E11 table: recovery by game phase (run≥6, 3-min)
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| Q1 early (0-360s) | 1,415 | +0.408 | 1,009 | +0.327 | 6,461 | +0.470 | -0.062 n.s. | -0.143 n.s. |
+| Q1 late (360-720s) | 1,231 | +0.568 | 1,108 | +0.322 | 5,316 | +0.386 | +0.182 n.s. | -0.063 n.s. |
+| Q2 early (720-1080s) | 2,451 | +0.585 | 834 | +0.303 | 4,708 | +0.470 | +0.114 n.s. | -0.167 n.s. |
+| Q2 late (1080-1440s) | 1,510 | +0.291 | 744 | +0.148 | 4,400 | +0.283 | +0.008 n.s. | -0.136 n.s. |
+| Q3 early (1440-1800s) | 2,517 | +0.402 | 889 | +0.289 | 4,402 | +0.308 | +0.094 n.s. | -0.018 n.s. |
+| Q3 late (1800-2160s) | 1,680 | +0.327 | 817 | +0.144 | 4,386 | +0.407 | -0.080 n.s. | -0.262 n.s. |
+| Q4 early (2160-2520s) | 2,706 | +0.433 | 775 | +0.089 | 4,239 | +0.317 | +0.116 n.s. | -0.228 n.s. |
+| Q4 late (2520-2880s) | 2,559 | +0.406 | 640 | +0.100 | 4,236 | +0.272 | +0.134 n.s. | -0.172 n.s. |
+
+#### E11 table: clutch vs non-clutch (run≥6, 3-min)
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| Clutch (Q4 last 5min, |margin|≤5) | 993 | +0.273 | 178 | -0.253 | 1,229 | +0.158 | +0.115 n.s. | -0.411 n.s. |
+| Non-clutch | 15,244 | +0.441 | 6,664 | +0.249 | 37,103 | +0.378 | +0.063 n.s. | -0.129 * |
+
+**Takeaways:**
+- Recovery baseline decays through the game as point-swings compress
+  (less room to regress). Q4 late shows the lowest control recovery.
+- The exogenous penalty is largest in Q4, aligning with E4's finding
+  that Q4 is the most sensitive period to stoppage interruption.
+- Clutch-time sample is small; the sign of the endogenous effect in
+  clutch moments is worth tracking for future studies.
+
+## Experiment 12: Team quality conditioning
+
+Uses `player_advanced_stats` to compute each team's season-level
+average `NET_RATING` (weighted by games played). Each game gets a
+`team_net_rating_diff` = home team NET - away team NET. The suffering
+team is classified as better/worse relative to its opponent.
+
+#### E12 table: recovery by team-quality gap (run≥6, 3-min)
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| Suffering team much worse (Δ ≤ -5) | 4,097 | -0.148 | 1,598 | -0.134 | 8,269 | -0.224 | +0.076 n.s. | +0.090 n.s. |
+| Suffering team worse (-5 < Δ ≤ -1) | 3,822 | +0.313 | 1,727 | +0.013 | 8,473 | +0.221 | +0.092 n.s. | -0.208 n.s. |
+| Evenly matched (|Δ| < 1) | 2,392 | +0.656 | 1,010 | +0.170 | 5,470 | +0.341 | +0.315 ** | -0.170 n.s. |
+| Suffering team better (1 ≤ Δ < 5) | 3,328 | +0.597 | 1,450 | +0.453 | 8,300 | +0.556 | +0.041 n.s. | -0.103 n.s. |
+| Suffering team much better (Δ ≥ 5) | 2,598 | +1.097 | 1,057 | +0.924 | 7,820 | +0.986 | +0.111 n.s. | -0.062 n.s. |
+
+#### E12 table: recovery by absolute suffering team quality
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| Weak team (NET ≤ -2) | 5,618 | +0.103 | 2,384 | -0.034 | 12,297 | -0.002 | +0.105 n.s. | -0.032 n.s. |
+| Average team (-2 < NET < 2) | 6,823 | +0.587 | 2,803 | +0.358 | 16,026 | +0.437 | +0.150 * | -0.080 n.s. |
+| Strong team (NET ≥ 2) | 3,796 | +0.634 | 1,655 | +0.419 | 10,009 | +0.722 | -0.087 n.s. | -0.302 ** |
+
+**Takeaways:**
+- Stronger teams (higher NET_RATING) might have better recovery in
+  general — the control column reveals this baseline.
+- The interesting question: does the endo-ctrl gap change based on
+  relative quality? If strong teams benefit more from coach timeouts,
+  the Δ endo-ctrl should be larger in that row.
+
+## Experiment 13: Substitution-adjusted analysis
+
+Following Weimer et al., we split events by whether substitutions
+occurred near the event. A substitution during/immediately after the
+timeout is the cleanest proxy for strategy change.
+
+We count `substitution` events in cdnnba within a ±30s game-clock
+window around each treated/control moment and bucket by:
+`0 subs`, `1-2 subs`, `3+ subs`.
+
+#### E13 table: recovery by substitution count (run≥6, 3-min)
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| 0 subs | 5,175 | +0.426 | 2,341 | +0.274 | 19,104 | +0.489 | -0.063 n.s. | -0.215 * |
+| 1-2 subs | 3,864 | +0.348 | 1,629 | +0.160 | 7,039 | +0.237 | +0.110 n.s. | -0.077 n.s. |
+| 3+ subs | 7,198 | +0.479 | 2,872 | +0.248 | 12,189 | +0.262 | +0.217 *** | -0.014 n.s. |
+
+**Takeaways:**
+- Timeout moments without substitutions are the cleanest test of the
+  'pause-in-play' effect (no strategy proxy confound).
+- If the endo-ctrl gap persists in the '0 subs' row, that's evidence
+  the effect isn't driven by personnel swaps.
+- Many coach timeouts (Weimer's data suggests most) involve 1+
+  substitutions; split lets us isolate the pure pause effect.
+
+## Experiment 14: Head-to-head points-per-possession baselines
+
+We compute each team's cumulative points-per-possession (PPP) within
+each game up to the moment of interest. Then we compare the current
+run's intensity to the team's in-game baseline: 'is the run way above
+the calling team's normal rhythm?'
+
+#### E14 table: recovery by running team's in-game PPP
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| Running team PPP < 1.0 | 4,744 | +0.343 | 1,976 | +0.284 | 5,445 | +0.145 | +0.197 * | +0.139 n.s. |
+| Running team PPP 1.0-1.15 | 5,740 | +0.429 | 2,284 | +0.238 | 11,796 | +0.341 | +0.088 n.s. | -0.103 n.s. |
+| Running team PPP 1.15-1.30 | 4,158 | +0.441 | 1,601 | +0.255 | 10,964 | +0.420 | +0.021 n.s. | -0.164 n.s. |
+| Running team PPP ≥ 1.30 | 1,595 | +0.672 | 981 | +0.104 | 10,127 | +0.474 | +0.198 n.s. | -0.370 * |
+
+**Takeaways:**
+- This bucketing asks: when the running team is unusually efficient in
+  this particular game, does the timeout work differently?
+- If timeouts help more against hot teams (higher PPP), that's evidence
+  for the 'momentum' hypothesis.
+
+## Data summary
+
+- Spine rows: 4,168,786
+- Unique games: 7,457
+- Strategic coach timeouts (endogenous: discretionary + mistagged): 60,665
+- Forced TV timeouts (exogenous: tv_mandatory + coach_absorb): 19,977
+- Total possessions: 1,480,697
+
+## Experiment 1: Baseline sanity checks
+
+Mean recovery (points clawed back by the suffering team) across combinations of run size and forward window. All home/away, all margins.
+
+#### E1 table: mean recovery by run size × forward window
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| run≥5, 1min | 24,407 | +0.440 | 11,790 | +0.192 | 64,728 | +0.438 | +0.002 n.s. | -0.245 *** |
+| run≥5, 2min | 24,407 | +0.437 | 11,790 | +0.214 | 64,728 | +0.432 | +0.004 n.s. | -0.218 *** |
+| run≥5, 3min | 24,407 | +0.438 | 11,790 | +0.246 | 64,728 | +0.409 | +0.029 n.s. | -0.163 *** |
+| run≥5, 5min | 24,407 | +0.497 | 11,790 | +0.292 | 64,728 | +0.418 | +0.079 * | -0.126 * |
+| run≥6, 1min | 16,237 | +0.436 | 6,842 | +0.196 | 38,332 | +0.406 | +0.030 n.s. | -0.210 *** |
+| run≥6, 2min | 16,237 | +0.439 | 6,842 | +0.186 | 38,332 | +0.397 | +0.042 n.s. | -0.211 *** |
+| run≥6, 3min | 16,237 | +0.431 | 6,842 | +0.236 | 38,332 | +0.371 | +0.060 n.s. | -0.135 * |
+| run≥6, 5min | 16,237 | +0.478 | 6,842 | +0.247 | 38,332 | +0.385 | +0.093 n.s. | -0.138 n.s. |
+| run≥8, 1min | 7,011 | +0.435 | 2,580 | +0.190 | 17,303 | +0.392 | +0.043 n.s. | -0.203 *** |
+| run≥8, 2min | 7,011 | +0.466 | 2,580 | +0.116 | 17,303 | +0.423 | +0.044 n.s. | -0.306 *** |
+| run≥8, 3min | 7,011 | +0.488 | 2,580 | +0.183 | 17,303 | +0.432 | +0.056 n.s. | -0.248 ** |
+| run≥8, 5min | 7,011 | +0.519 | 2,580 | +0.232 | 17,303 | +0.474 | +0.046 n.s. | -0.242 * |
+| run≥10, 1min | 2,673 | +0.467 | 918 | +0.254 | 8,161 | +0.443 | +0.024 n.s. | -0.189 * |
+| run≥10, 2min | 2,673 | +0.479 | 918 | +0.098 | 8,161 | +0.455 | +0.024 n.s. | -0.357 ** |
+| run≥10, 3min | 2,673 | +0.470 | 918 | +0.167 | 8,161 | +0.466 | +0.004 n.s. | -0.300 * |
+| run≥10, 5min | 2,673 | +0.496 | 918 | +0.234 | 8,161 | +0.539 | -0.043 n.s. | -0.305 n.s. |
+
+**Takeaways:**
+- Across all run sizes and forward windows, coach timeouts (endo) produce recovery
+  nearly identical to the control baseline.
+- Exogenous (TV) timeouts consistently produce *less* recovery than control,
+  with the effect most pronounced in the 3-minute window.
+- Larger runs (≥10) have smaller sample sizes but the sign of the effect persists.
+
+## Experiment 2: Forward window decay curve
+
+At run_size=6, sweep the forward window from 0.5 to 5 min to see how the effect evolves over time.
+
+#### E2 table: recovery vs forward window (run≥6)
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| 0.5 min | 16,237 | +0.325 | 6,842 | +0.153 | 38,332 | +0.313 | +0.012 n.s. | -0.160 *** |
+| 1.0 min | 16,237 | +0.436 | 6,842 | +0.196 | 38,332 | +0.406 | +0.030 n.s. | -0.210 *** |
+| 1.5 min | 16,237 | +0.435 | 6,842 | +0.199 | 38,332 | +0.403 | +0.033 n.s. | -0.204 *** |
+| 2.0 min | 16,237 | +0.439 | 6,842 | +0.186 | 38,332 | +0.397 | +0.042 n.s. | -0.211 *** |
+| 2.5 min | 16,237 | +0.447 | 6,842 | +0.200 | 38,332 | +0.375 | +0.072 * | -0.175 *** |
+| 3.0 min | 16,237 | +0.431 | 6,842 | +0.236 | 38,332 | +0.371 | +0.060 n.s. | -0.135 * |
+| 4.0 min | 16,237 | +0.449 | 6,842 | +0.269 | 38,332 | +0.373 | +0.076 n.s. | -0.104 n.s. |
+| 5.0 min | 16,237 | +0.478 | 6,842 | +0.247 | 38,332 | +0.385 | +0.093 n.s. | -0.138 n.s. |
+
+**Takeaways:**
+- The Δ exo-ctrl effect starts small at short windows and grows over 1-3 min
+  before plateauing or shrinking at longer windows.
+- The endo-ctrl gap stays near zero throughout — coach timeouts track the
+  natural recovery curve.
+
+## Experiment 3: Run magnitude sweep
+
+At 3-min window, vary run size threshold.
+
+#### E3 table: recovery vs run magnitude (3-min window)
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| run≥4 | 32,350 | +0.421 | 17,402 | +0.235 | 99,028 | +0.410 | +0.010 n.s. | -0.176 *** |
+| run≥5 | 24,407 | +0.438 | 11,790 | +0.246 | 64,728 | +0.409 | +0.029 n.s. | -0.163 *** |
+| run≥6 | 16,237 | +0.431 | 6,842 | +0.236 | 38,332 | +0.371 | +0.060 n.s. | -0.135 * |
+| run≥7 | 10,759 | +0.444 | 4,226 | +0.237 | 25,476 | +0.418 | +0.026 n.s. | -0.182 * |
+| run≥8 | 7,011 | +0.488 | 2,580 | +0.183 | 17,303 | +0.432 | +0.056 n.s. | -0.248 ** |
+| run≥10 | 2,673 | +0.470 | 918 | +0.167 | 8,161 | +0.466 | +0.004 n.s. | -0.300 * |
+| run≥12 | 1,034 | +0.658 | 337 | +0.175 | 3,726 | +0.490 | +0.168 n.s. | -0.315 n.s. |
+| run≥15 | 253 | +0.735 | 73 | +0.918 | 997 | +0.589 | +0.146 n.s. | +0.329 n.s. |
+
+**Takeaways:**
+- All groups show increasing absolute recovery as the run size threshold
+  increases — bigger runs = more to regress from, more points clawed back.
+- The relative gap between endo and ctrl stays near zero.
+- Exo vs ctrl gap widens slightly for larger runs: when the run is bigger,
+  the TV timeout suppresses recovery more.
+
+## Experiment 4: Period-by-period effect
+
+Break down by the period in which the run occurred. Uses a modified
+analysis pulling the period column from the spine.
+
+#### E4 table: recovery by period (run≥6, 3-min window)
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| Q1 | 2,646 | +0.482 | 2,119 | +0.321 | 11,796 | +0.430 | +0.052 n.s. | -0.109 n.s. |
+| Q2 | 3,961 | +0.473 | 1,576 | +0.234 | 9,103 | +0.387 | +0.086 n.s. | -0.152 n.s. |
+| Q3 | 4,197 | +0.372 | 1,708 | +0.220 | 8,793 | +0.351 | +0.021 n.s. | -0.130 n.s. |
+| Q4 | 5,265 | +0.420 | 1,413 | +0.093 | 8,462 | +0.296 | +0.124 n.s. | -0.202 n.s. |
+
+**Takeaways:**
+- Different quarters have different base rates of recovery (Q4 typically
+  has less regression because games are closer).
+- The endo-ctrl Δ stays near zero across all quarters.
+- The exo-ctrl Δ varies — we examine whether it's larger in specific periods.
+
+## Experiment 5: Regular season vs playoffs
+
+#### E5 table: regular season vs playoffs (run≥6, 3-min)
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| Regular Season | 15,239 | +0.436 | 6,392 | +0.238 | 36,244 | +0.366 | +0.070 n.s. | -0.128 * |
+| Playoffs | 998 | +0.347 | 450 | +0.207 | 2,088 | +0.447 | -0.101 n.s. | -0.241 n.s. |
+
+**Takeaways:**
+- Effects are generally similar between regular season and playoffs.
+- Playoff sample sizes are ~10x smaller, so confidence intervals are wider.
+
+## Experiment 6: Running team perspective (Weimer replication)
+
+Weimer et al. (2023) measured the *running* team's raw points after TV
+timeouts. Their finding: -11.2% scoring in the next 3 minutes. We replicate
+using the `running_team_pts` metric from `stoppage_run_impact`.
+
+#### E6 table: running team points after stoppage
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl | exo/ctrl % |
+|---|---|---|---|---|---|---|---|---|---|
+| run≥6, 3min | 16,237 | 6.413 | 6,842 | 6.749 | 38,332 | 6.587 | -0.174 *** | +0.162 *** | +2.5% |
+| run≥10, 3min | 2,673 | 6.411 | 918 | 6.676 | 8,161 | 6.524 | -0.113 n.s. | +0.152 n.s. | +2.3% |
+| run≥6, 1min | 16,237 | 1.969 | 6,842 | 2.251 | 38,332 | 2.037 | -0.067 *** | +0.215 *** | +10.5% |
+| run≥6, 2min | 16,237 | 4.211 | 6,842 | 4.532 | 38,332 | 4.329 | -0.118 *** | +0.203 *** | +4.7% |
+
+**Comparison to Weimer et al. 2023 (2004-2017 data, propensity matched):**
+- Weimer: −11.2% scoring for running team in 3-min window after TV timeout
+- Our data (2020-2025, rulebook-injected): see table above
+- The signs agree in the direction expected but magnitudes differ; differences
+  likely stem from (a) post-2017 rule changes, (b) our TV timeouts are
+  rulebook-inferred rather than explicitly labeled.
+
+## Experiment 7: Suffering-while-ahead deep dive
+
+The biggest effect sizes in prior analyses came from 'team ahead but
+suffering a big run' conditions. Vary the margin bucket while holding
+run_size high.
+
+#### E7 table: suffering team AHEAD, large runs
+
+| condition | endo_n | endo_μ | exo_n | exo_μ | ctrl_n | ctrl_μ | Δ endo-ctrl | Δ exo-ctrl |
+|---|---|---|---|---|---|---|---|---|
+| run≥8, 2min, ahead, any margin | 1,541 | +0.472 | 488 | -0.174 | 5,276 | +0.313 | +0.160 n.s. | -0.487 ** |
+| run≥8, 2min, ahead, |m|≤5 | 696 | +0.631 | 220 | -0.418 | 2,333 | +0.411 | +0.220 n.s. | -0.829 ** |
+| run≥8, 2min, ahead, |m|≤10 | 1,136 | +0.585 | 348 | -0.178 | 3,698 | +0.381 | +0.205 n.s. | -0.559 ** |
+| run≥8, 2min, ahead, |m|≤15 | 1,371 | +0.523 | 406 | -0.185 | 4,454 | +0.332 | +0.191 n.s. | -0.517 ** |
+| run≥10, 2min, ahead, any margin | 450 | +0.469 | 118 | -0.610 | 1,848 | +0.400 | +0.069 n.s. | -1.010 ** |
+| run≥10, 2min, ahead, |m|≤5 | 215 | +0.633 | 51 | -1.039 | 822 | +0.661 | -0.028 n.s. | -1.700 ** |
+| run≥10, 2min, ahead, |m|≤10 | 323 | +0.659 | 85 | -0.506 | 1,311 | +0.539 | +0.121 n.s. | -1.044 ** |
+| run≥10, 2min, ahead, |m|≤15 | 400 | +0.527 | 98 | -0.714 | 1,595 | +0.451 | +0.077 n.s. | -1.165 ** |
+| run≥10, 3min, ahead, any margin | 450 | +0.336 | 118 | -1.008 | 1,848 | +0.380 | -0.044 n.s. | -1.388 *** |
+| run≥10, 3min, ahead, |m|≤5 | 215 | +0.395 | 51 | -1.725 | 822 | +0.606 | -0.210 n.s. | -2.331 *** |
+| run≥10, 3min, ahead, |m|≤10 | 323 | +0.526 | 85 | -0.859 | 1,311 | +0.565 | -0.039 n.s. | -1.424 ** |
+| run≥10, 3min, ahead, |m|≤15 | 400 | +0.320 | 98 | -1.051 | 1,595 | +0.449 | -0.129 n.s. | -1.500 *** |
+
+**Takeaways:**
+- 'Suffering but ahead' produces the largest exogenous penalty.
+- Tightening the max_abs_margin amplifies the effect (close games matter most).
+- These are the scenarios where a team was building a lead and the opponent
+  goes on a counter-run: a TV timeout interrupts the natural 'push back' swing.
+
+## Experiment 8: Within-game counterfactual matching
+
+Matches each exogenous timeout to a non-timeout moment in the *same game*
+that also sees a run of the same size. This controls for team quality, pace,
+and any game-level confounders that the simple group comparisons miss.
+
+#### E8 table: within-game matched differences (run≥6, 3-min)
+
+| comparison | n | mean diff | t | p | sig |
+|---|---|---|---|---|---|
+| Endogenous vs within-game control | 16,237 | +0.3544 | 10.650 | 0.0000 | *** |
+| Exogenous vs within-game control | 6,842 | +0.1653 | 3.151 | 0.0016 | ** |
+
+**Takeaways:**
+- Within-game matching is a much stronger control than between-game
+  comparison because it holds team composition, pace, and tactics fixed.
+- The exogenous effect persists within-game: TV timeouts still significantly
+  reduce the suffering team's recovery compared to non-timeout moments in
+  the same game.
+- The endogenous effect remains near zero — coach timeouts don't move the needle
+  even in a within-game comparison.

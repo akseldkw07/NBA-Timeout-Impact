@@ -131,16 +131,20 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
     def f_timeout_endogenous(self) -> pl.Series:
         """Boolean mask: row is a coach-chosen *strategic* timeout (endogenous).
 
-        Includes ``coach_discretionary`` (no mandatory tag), ``mistagged_discretionary``
-        (league-tagged mandatory that failed rulebook gates — still a coach
-        decision), and ``challenge`` (coach-initiated replay challenge).
+        Includes ``coach_discretionary`` (no mandatory tag) and
+        ``mistagged_discretionary`` (league-tagged mandatory that failed
+        rulebook gates — still a coach decision).
 
         Excludes ``coach_absorb``: those satisfy a slot that was queued to
         auto-fire within ~80s of the trigger anyway, so the coach isn't
         gaining strategic option-value by calling them — they're treated as
         exogenous via ``f_timeout_exogenous``.
+
+        Excludes ``challenge``: coach-initiated replay challenges are a
+        different decision (review a specific call) from strategic huddle
+        timeouts; they're analyzed separately rather than aggregated here.
         """
-        return self.cdnnba["timeout_cause"].is_in(["coach_discretionary", "mistagged_discretionary", "challenge"])
+        return self.cdnnba["timeout_cause"].is_in(["coach_discretionary", "mistagged_discretionary"])
 
     @memo_series
     def f_timeout_exogenous(self) -> pl.Series:
@@ -669,12 +673,13 @@ class CDNNBAMemoPL(MemoDataFramePL[CDNNBADatasetInputPL]):
 
         # Classify events using cause-based taxonomy.
         # Endogenous = strategic coach calls (coach_discretionary,
-        # mistagged_discretionary, challenge). Exogenous = the break would
-        # have happened either way (tv_mandatory, coach_absorb) or a natural
-        # stoppage.
+        # mistagged_discretionary). Exogenous = the break would have happened
+        # either way (tv_mandatory, coach_absorb) or a natural stoppage.
+        # Coach challenges are excluded from the endogenous aggregate
+        # (different decision class — analyzed separately).
         is_timeout = pl.col("actionType") == "timeout"
         cause = pl.col("timeout_cause")
-        is_endogenous_cause = cause.is_in(["coach_discretionary", "mistagged_discretionary", "challenge"])
+        is_endogenous_cause = cause.is_in(["coach_discretionary", "mistagged_discretionary"])
         is_exogenous_cause = cause.is_in(["tv_mandatory", "coach_absorb"])
         is_stoppage = pl.col("actionType") == "stoppage"
 

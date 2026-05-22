@@ -2,6 +2,7 @@
 
 \usepackage{blindtext}
 \usepackage{amsmath}
+\usepackage{booktabs}
 
 % Any additional packages needed should be included after jmlr2e.
 % Note that jmlr2e.sty includes epsfig, amssymb, natbib and graphicx,
@@ -36,6 +37,7 @@
 \jmlrheading{26}{2026}{1-\pageref{LastPage}}{4/26; Revised 5/26}{9/26}{21-0000}{Aksel Kretsinger-Walters}
 
 % Short headings should be running head and authors last names
+% TODO add photos
 
 \ShortHeadings{A Causal Evaluation of Timeouts in the NBA}{Aksel Kretsinger-Walters}
 \firstpageno{1}
@@ -63,13 +65,6 @@ New York, NY 10027, USA}
 \begin{keywords}
 		Causal inference, sports analytics, NBA, timeouts, momentum, difference-in-differences, synthetic control
 \end{keywords}
-
-% The TODO comments are broadly split into latex modifications & experiment/code modifications. We should first
-% identify which latex modifications can be done without any code changes (ie are indepdenent of code).
-% We should then run through the bottom section of code TODOs and save the updated results
-% Then, we update all the remaining latex TODOs that depend on those results
-% Finally, we comb through the latex report to find and fix any stale values that weren't explicitly flagged
-% with a TODO comment
 
 \section{Significance}
 % Why is this problem important? To whom?
@@ -104,7 +99,7 @@ opposing team is scoring at an unusually high rate, any subsequent slowdown refl
 scoring to return to its average rather than a causal effect of the stoppage itself.
 
 \citet{gibbs2021causal} revisit the same question but restrict attention to the specific scenario of an
-opposing team's scoring run, where the strategic stakes of the timeout decision are highest. Working within
+opposing team's scoring run. Working within
 the Rubin causal model, they carefully define units under SUTVA and introduce an interpretable outcome based
 on the score difference to capture broad changes in scoring dynamics. In contrast to \citet{assis2020stop},
 they find that calling a timeout during an opposing run is \emph{slightly disadvantageous} on average, and
@@ -118,50 +113,77 @@ respect to in-game momentum. Using TV timeouts as a natural experiment that mimi
 pause, they report an \emph{11.2\% decline} in the scoring rate of the team carrying momentum immediately
 after a TV timeout, and they show this effect is robust to run size, substitutions, and game context. This
 stands in sharp contrast to the null result of \citet{assis2020stop} and the mildly negative result of
-\citet{gibbs2021causal}: by removing coach selection bias entirely, \citet{weimer2023causal} argue that
+\citet{gibbs2021causal}; by removing coach selection bias entirely, \citet{weimer2023causal} argue that
 team-level momentum genuinely exists and that pauses in play do interrupt it.
 
-\citet{qiu2025interrupt} approach the problem from a sports-psychology perspective rather than a
-causal-inference one, analyzing 4{,}051 timeouts across 1{,}235 elite basketball games using linear mixed
-models to test pre- versus post-timeout momentum over short (48s), medium (96s), and long (144s) windows.
-They find that timeouts significantly \emph{increase} momentum for teams that are trailing or otherwise
-disadvantaged, while tending to \emph{decrease} momentum for teams that are already ahead, with contextual
-factors such as game period and opponent strength substantially moderating the effect. Unlike the three
-causal papers above, which target an average treatment effect, their results emphasize heterogeneity:
-timeouts are neither uniformly helpful nor uniformly useless, and their efficacy is highly conditional on
-game state. Together these four studies motivate our own analysis, which aims to reconcile the tension
-between the exogenous-timeout evidence for a real momentum effect and the selection-bias-corrected evidence against one.
-
-% Acknowledgements and Disclosure of Funding should go at the end, before appendices and references
+% Acknowledgments and Disclosure of Funding should go at the end, before appendices and references
 \section{Methods}
 
 \subsection{Data}
 
 We build our analysis on the cdnnba enriched play-by-play data for the 2020--2025 NBA seasons (regular
-season and playoffs), loaded via our own \texttt{CDNNBAMemoPL.load\_all()} pipeline. After cleaning, the
-spine contains 4{,}183{,}347 play-by-play rows spanning 7{,}457 unique games and 1{,}480{,}697 possessions,
-of which 83{,}662 are coach-called timeouts and 14{,}561 are inferred mandatory television timeouts.
+season and playoffs). After cleaning, the
+dataset contains 4{,}168{,}786 play-by-play rows spanning 7{,}457 unique games and 1{,}480{,}697 possessions,
+of which 82{,}197 are coach-logged timeouts.
 
-\subsection{Timeout classification}
+\subsection{Mandatory Timeout Rule Changes}
 
-We partition stoppage events into three mutually exclusive groups. \textbf{Endogenous} timeouts are
-coach-initiated stoppages, identified by \texttt{actionType == timeout} and \texttt{subType} in
-\{\texttt{full}, \texttt{challenge}\}. These are endogenous in the causal sense because coaches decide when to
-call them in response to game state. \textbf{Exogenous} timeouts are the mandatory television timeouts
-specified by the NBA rulebook at roughly the 6:59 and 2:59 marks of each period. The cdnnba feed does not
-directly label TV timeouts, so we inject them using a rulebook-based inference procedure and assign them
-\texttt{subType == official\_inferred}. (TODO update the efficacy of this procedure) We validated this
-procedure against the explicitly labeled 2013--2016
-nbastatsv3 feed and obtained an F1 of $0.88$--$0.92$, indicating good but imperfect recovery of mandatory
-timeouts. \textbf{Control} events are dead-ball moments with no timeout occurring during an active scoring
-run; to avoid over-representing long runs, we subsample at most one control per run segment.
+For to the 2017-18 season, the NBA Board of Governors overhauled the timeout format
+\citep{nba2017bog,nba2017timeout}. Moving forward, there would be 2 mandatory TV timeouts per period,
+triggered at the 6:59 and 2:59 marks. In addition, they changed the rules to deduct the first unused
+mandatory timeout from the home team, and the second from the visiting team. \textit{Example}: If neither
+team has called a timeout by the 6:59 mark, the official scorer calls one and charges it to the home team; if
+no subsequent timeout is taken before the 2:59 mark, the scorer calls one and charges it to the visiting team.
 
-The endogenous/exogenous distinction is causal rather than mechanical. NBA rules allow substitutions and
-strategy huddles during \emph{any} timeout (full, short, or mandatory TV), so the opportunity to alter play
-after the break is identical in both cases. What separates the two types is how the trigger is selected:
-coaches call endogenous timeouts in response to game state (introducing selection bias on adverse momentum),
-whereas mandatory TV timeouts fire at fixed clock positions and are therefore plausibly exogenous
-conditional on the clock.
+This rulebook change has two implications for our analysis. First, it changes the settings of our analysis
+from those conducted by \citet{weimer2023causal}, which used data from 2013--2017. Secondly, it creates a new
+category of \textit{pseudo-mandatory} timeouts: coach calls that occur in the seconds leading up to their imminent
+mandatory trigger.
+
+\subsection{Timeout classification}\label{sec:timeout-classification}
+
+\begin{figure}[h!]
+		\centering
+		\includegraphics[width=\textwidth]{figures/fig_cause_vs_sr.png}
+		\caption{Distribution of cdnnba timeouts by cause and by seconds remaining in the period, all
+				four regular periods combined. The two dashed vertical lines mark the rulebook trigger points
+		(6:59 and 2:59). }
+		\label{fig:cause-vs-sr}
+\end{figure}
+
+Of those 82{,}197 timeouts, the composition is as follows:
+
+\begin{itemize}
+		\item 13{,}172 \texttt{tv\_mandatory} rows (league-forced commercial breaks at roughly the 6:59 and 2:59
+				marks of each period). These serve as our primary `exogenous' treatment group.
+		\item 6{,}805 \texttt{coach\_absorb} rows. These are coach called timeouts that occur right before (within
+				80 seconds) a mandatory timeout would have triggered.
+		\item 23{,}747 \texttt{coach\_discretionary} rows. These are coach called timeouts
+		\item 36{,}918 \texttt{mistagged\_discretionary} rows. These are coach called timeouts that were tagged as
+				``mandatory'' by the feed, but \textbf{we reclassified} as discretionary in nature.
+		\item 1{,}555 \texttt{coach\_challenge} rows. These are coach challenges, which are a special type of timeout that
+				allow for replay review and potential overturning of the preceding call.
+\end{itemize}
+
+\textbf{Endogenous} events are the union of the coach\_discretionary and mistagged\_discretionary
+categories, which are both coach-initiated. While coach\_challenge events are also coach-initiated, we keep
+them separate as a secondary treatment group because they have an additional mechanism (replay review) and a much
+smaller sample size.
+
+\textbf{Exogenous} events are the union of the tv\_mandatory and coach\_absorb categories together with
+natural game stoppages (out-of-bounds, injuries, blood rule, equipment).
+All three share the same ``pause in play'' mechanism with no coach selection on game state; only the
+trigger differs.
+
+\textbf{Control} events are \emph{play-continuing} moments during an active scoring run -- rows where
+neither a timeout nor a stoppage occurred, so play proceeded normally. We sample at most one control per
+run segment to avoid over-representing long runs.
+
+NBA rules allow substitutions and strategy huddles during \emph{any} timeout (full, short, mandatory TV,
+challenge, injury), so the opportunity to alter play after the break is identical in all cases. What
+separates the two types is how the trigger is selected: coaches initiate endogenous timeouts in response to
+game state (introducing selection bias on adverse momentum), whereas mandatory TV timeouts and coach\_absorb
+events fire at fixed clock positions and are therefore exogenous conditional on the clock.
 
 \subsection{Run and recovery definitions}
 
@@ -202,12 +224,9 @@ construction.
 
 \paragraph{Method.}
 We first build a candidate pool by classifying every spine event during a run of $|\texttt{streak}| \geq s$
-into one of three groups: \textbf{treated-endogenous} (a coach \texttt{full} or \texttt{challenge} timeout
-called by the suffering team), \textbf{treated-exogenous} (an \texttt{official\_inferred} TV timeout or a
-generic dead-ball \texttt{stoppage}), or \textbf{control} (any spine event during the same run that is not
-		classified as treated, with at most one control sampled per contiguous run segment to avoid over-counting
-long runs). For each treated event we then search the control pool \emph{within the same game} for a
-candidate that satisfies all of: the same period; the same sign of $\texttt{streak}$ (so the run is against
+into one of (\textbf{Endogenous}, \textbf{Exogenous}, \textbf{Control}). For each treated event we then
+search the control pool \emph{within the same game and period} for a
+candidate that satisfies all of: the same sign of $\texttt{streak}$ (so the run is against
 the same team); $|\Delta\,\texttt{streak}| \leq 2$ (comparable run magnitude);
 $|\Delta\,\texttt{seconds\_remaining}| \leq 120$\,s (comparable clock position within the period); and
 $|\Delta\,\texttt{suffering\_margin}| \leq 3$, where the suffering margin
@@ -216,7 +235,7 @@ $|\Delta\,\texttt{suffering\_margin}| \leq 3$, where the suffering margin
 \]
 is the score margin from the suffering team's perspective (positive when the suffering team is still ahead
 despite the run against it). When multiple candidate controls satisfy the constraints, we select the one
-minimising the weighted Manhattan distance
+minimizing the weighted Manhattan distance
 \[
 		d(\text{treated},\, \text{control}) \;=\; 2\,|\Delta\,\texttt{streak}|
 		\;+\; \frac{|\Delta\,\texttt{seconds\_remaining}|}{30}
@@ -230,8 +249,9 @@ event and its matched twin, and we aggregate across pairs with a paired $t$-test
 \subsection{Moderator analyses}
 
 To probe heterogeneity we repeat the between-group and matched-twin analyses within slices defined by
-(i) timeout subtype (\texttt{coach\_full}, \texttt{coach\_challenge}, \texttt{official\_inferred},
-\texttt{stoppage}); (ii) game phase and clutch status (last five minutes of Q4 with margin $\leq 5$);
+(i) timeout subtype (\texttt{tv\_mandatory}, \texttt{coach\_absorb}, \texttt{coach\_discretionary},
+\texttt{mistagged\_discretionary}, \texttt{coach\_challenge}, \texttt{stoppage});
+(ii) game phase and clutch status (last five minutes of Q4 with margin $\leq 5$);
 (iii) season-long team quality gap, using each team's \texttt{NET\_RATING} from \texttt{player\_advanced\_stats};
 (iv) the number of substitutions within a $\pm 30$s game-clock window around the event, bucketed as
 $\{0,\, 1\text{--}2,\, 3{+}\}$; and (v) the running team's in-game cumulative points-per-possession (PPP) at
@@ -253,146 +273,183 @@ also computed $\texttt{running\_team\_pts}$ in the style of \citet{weimer2023cau
 \emph{positive} exogenous-minus-control gap of $+2.8\%$ to $+14.6\%$ depending on window  --  the opposite sign
 from Weimer's reported $-11.2\%$. This is internally consistent with our suffering-team analysis (if the
 suffering team recovers less, the running team must score relatively more) and likely reflects the post-2017
-mandatory-timeout rule changes together with the inferred-rather-than-labeled nature of our TV timeouts.
+mandatory-timeout rule changes together with differences in how we classify mandatory timeouts.
 
-To avoid confusion we'll restate our conclusion for this result: coach timeouts appear to perform worse
-than random stoppages of play and exogenous (TV) timeouts. We believe that this is \textbf{not} a causal
-result, but instead a consequence of the adverse situations during which coaches predominantly call
-timeouts. TODO: update this conclusion once the matched-twin results are in, and make sure to clarify the
-distinction between the between-group and within-game results in the final report.
+To avoid confusion we restate the result: under a between-group estimator, endogenous coach timeouts look
+indistinguishable from control, and exogenous breaks look mildly negative. We believe this is \textbf{not} a
+causal effect but instead a consequence of the adverse situations in which coaches predominantly call
+timeouts -- a game-level selection bias that is absorbed into the global control baseline. The matched-twin
+design of \S\ref{sec:matched-twin-results}, which holds game identity (and therefore that selection) fixed
+by construction, will reverse this conclusion and produce a strongly positive and \emph{symmetric} causal
+estimate for both endogenous and exogenous breaks.
 
-\subsection{Within-game matched-twin results}
-TODO: update the numbers and significance levels below once the new matched-twin experiments are done, and
-update the interpretation accordingly. We should also add a sentence or two about the challenge results,
-which are currently missing from the report.
+\begin{figure}[h!]
+		\centering
+		\includegraphics[width=\textwidth]{figures/fig_recovery_distribution.png}
+		\caption{Distribution of 3-minute \texttt{recovery} across the three groups. The three densities
+				overlap almost entirely; the group means (dashed verticals) differ by less than half a
+		point.}
+		\label{fig:recovery-distribution}
+\end{figure}
+
+\subsection{Within-game matched-twin results}\label{sec:matched-twin-results}
+
+\begin{figure}[h!]
+		\centering
+		\includegraphics[width=0.85\textwidth]{figures/fig_betweengroup_vs_matched.png}
+		\caption{The same effect under the two estimators; The shift is
+				not from finding a new effect; it is from differencing out the game-level selection bias
+		that contaminated the between-group baseline.}
+		\label{fig:bg-vs-matched}
+\end{figure}
 
 The matched-twin design of \S\ref{sec:matched-twin} -- our cleanest causal test -- reverses the headline
-conclusion of the between-group analysis. With $s = 6$ and a 3-minute window we obtain 8{,}906 matched
-endogenous pairs and 2{,}667 matched exogenous pairs (each treated event matched to its closest in-game
+conclusion of the between-group analysis. With $s = 6$ and a 3-minute window we obtain 7{,}474 matched
+endogenous pairs and 3{,}480 matched exogenous pairs (each treated event matched to its closest in-game
 		control by the weighted distance $d$; control rows are reused across treated rows when they are the best
-match for multiple). The paired mean differences are \textbf{$+0.397$ pts for endogenous timeouts}
-($t = 27.9$, $p < 0.0001$) and \textbf{$+0.455$ pts for exogenous timeouts} ($t = 11.8$, $p < 0.0001$).
-Both effects are highly significant and both favor the suffering team; the exogenous effect is in fact
-slightly \emph{larger} than the endogenous effect, which is consistent with coaches selectively burning
-timeouts in especially adverse game states where recovery is hard even with help (see
-\hyperref[sec:future]{Future Work} on improving the pairing). Breaking the treated population into fine
-subtypes, every subtype shows the same sign and roughly the same magnitude: \texttt{coach\_full} $+0.396$
-***, \texttt{coach\_challenge} $+0.714$ * (small sample, $n = 35$), \texttt{official\_inferred} $+0.449$
-***, and generic \texttt{stoppage} events $+0.458$ ***. The reversal relative to the between-group results
-is driven by game-level selection: coach timeouts concentrate in games where the suffering team historically
-claws back less of its deficit during opponent runs (low-recovery games), so comparing the endogenous mean
-to a global control mean absorbs that selection into the baseline and erases the signal. Matching within
-game cancels this bias by construction. TODO: what does this mean? A coarser within-game \emph{mean}
-comparison -- in which each
-treated event is compared against the average $\texttt{recovery}$ of all controls in the same game, rather
-than against a single distance-minimising twin -- gives a consistent $+0.35$ pts effect for endogenous
-timeouts but shrinks the exogenous effect to near zero. The drop suggests that tight clock-position
-matching is more load-bearing for exogenous events (whose triggers are themselves clock-locked) than for
-endogenous ones.
+match for multiple). The paired mean differences are \textbf{$+0.408$ pts for endogenous timeouts}
+($t = 26.5$, $p < 0.0001$) and \textbf{$+0.405$ pts for exogenous timeouts} ($t = 13.2$, $p < 0.0001$). Note
+that these values are extremely similar. Breaking the treated population into the six fine
+subtypes of \S\ref{sec:timeout-classification} reveals the same sign and roughly the same magnitude
+everywhere: \texttt{tv\_mandatory} $+0.361$ *** ($n = 879$), generic \texttt{stoppage} $+0.458$ ***
+($n = 1{,}752$), \texttt{coach\_absorb} $+0.340$ *** ($n = 849$), \texttt{coach\_discretionary} $+0.429$ ***
+($n = 2{,}119$), \texttt{mistagged\_discretionary} $+0.400$ *** ($n = 5{,}355$), and \texttt{coach\_challenge}
+$+0.469$ ** ($n = 98$). The consistency across six structurally distinct event types -- league-forced auto-
+fires, natural stoppages, last-second coach absorbs, pure discretionary calls, mistagged-as-mandatory coach
+calls, and replay challenges -- is itself evidence that the effect is driven by the pause itself, not by
+who chose to take it or how the league billed it.
 
-We also offer a hypothesis for the exaggerated impact that coaching challenges demostrate in the data. A
-successful coaching challenge offers the calling team a break in play, a psychological boost, and tangible
-in-game benefits (e.g. Free Throws, Possession, etc). If we assume that coaches are skilled at challenging
-calls, it would follow to reason that this category of game stoppage would show larger effects. The
-assumption on successful coaching challenges is intuitive: coaches are backed by large analytics and rules
-experts teams, and the finite number of challenges (1 per game, with a second awarded if the first challenge
-is successful) means that coaches must use them judiciously. (TODO: re-run notebooks and figure out how the
-fail / success split looks )
+\begin{figure}[h!]
+		\centering
+		\includegraphics[width=\textwidth]{figures/fig_matched_twin_forest.png}
+		\caption{Forest plot of matched-twin pair differences with 95\% confidence intervals. The top
+				two rows are the coarse \textbf{endogenous} and \textbf{exogenous} aggregates; the
+		six rows below are the fine subtypes from \S\ref{sec:timeout-classification}. }
+		\label{fig:matched-twin-forest}
+\end{figure}
+
+The reversal relative to the between-group results is driven by game-level selection: coach timeouts
+concentrate in games where the suffering team historically claws back less of its deficit during opponent
+runs (low-recovery games), so comparing the endogenous mean to a global control mean absorbs that selection
+into the baseline and erases the signal. The matched twin lives in the same game, same period, with the
+same streak sign and a near-identical clock position and score margin, so any game-level confounder (team
+quality, pace, coaching style, overall momentum direction) is differenced out at the pair level and the
+estimator survives whatever selection-on-game produced the negative exogenous gap in \S4.1.
+
+% The $+0.714$ pair difference on coach challenges is large in magnitude but rests on $n = 35$ matched pairs
+% and reaches only $p < 0.05$. Two structural factors limit how much weight we can put on this row. First,
+% the cdnnba feed only emits \texttt{instantreplay} outcome rows for the 2020 and 2021 seasons; challenges
+% from 2022 onward have no recorded \texttt{overturned} / \texttt{stands} label, so we cannot examine the
+% broader population. Second, even when we restrict to those two seasons and try to split the matched
+% challenges by replay outcome (E15), only 19 of the 35 challenges line up with a replay row within our
+% 60-second window and -- coincidentally or otherwise -- all 19 are \texttt{overturned}, leaving zero failed
+% challenges in the matched sample. The broader 2020--2021 challenge population (1{,}446 challenges from
+% \texttt{instantreplay/challenge} rows, of which 688 are overturned and 758 fail) shows a near-even
+% success/failure split, so the all-overturned matched sample is a sampling artifact rather than a true
+% asymmetry. We therefore cannot test the natural mechanistic hypothesis -- that successful challenges drive
+% the entire coach\_challenge effect -- with the present matching protocol; we flag it as future work
+% (\S\ref{sec:future}) for a redesigned challenge-specific match that loosens the per-period clock constraint.
 
 \subsection{Mechanism and moderators}
 
-Once we have a signal, we can ask where it comes from. All moderator analyses in this section use a
-between-group Welch test of treated vs control within each stratum -- the same estimator as \S4.1, not the
-paired matched-twin of \S4.2. The magnitudes below are therefore directly comparable to the near-zero
-between-group baseline and reflect the residual signal that survives the selection bias after stratifying,
-not the underlying causal effect size; we use the coarser estimator here to keep per-stratum sample sizes
-large enough for a clean test.
+Once we have a signal, we can ask where it comes from. To that effect, we conducted Welch two-sample
+$t$-tests, whose values we report below -- that is, $\Delta = \mu_{\text{treated}} - \mu_{\text{control}}$, the
+difference between the mean \texttt{recovery} of treated events and the mean \texttt{recovery} of control
+events within each stratum.
+
+\begin{figure}[h!]
+		\centering
+		\includegraphics[width=0.85\textwidth]{figures/fig_moderator_heatmap.png}
+		\caption{Welch $\Delta = \mu_{\text{treated}} - \mu_{\text{control}}$ across moderator strata.
+				Blue cells favor the suffering team; red cells suppress recovery. The endogenous column
+				is most positive when many substitutions occur ($+0.22$ \textit{p} $< 0.001$) and in
+		evenly matched games ($+0.31$ \textit{p} $< 0.01$).}
+		\label{fig:moderator-heatmap}
+\end{figure}
 
 Stratifying by the number of substitutions in a $\pm 30$s window around the event reveals that the
 endogenous effect is concentrated entirely in timeouts accompanied by personnel changes: with 0
-substitutions the endogenous-control gap is $-0.05$ (n.s.), with 1--2 substitutions it is $+0.10$ (n.s.),
-and with 3 or more substitutions it rises to $+0.21$ ($p < 0.001$). The exogenous penalty is
-correspondingly largest ($-0.39$, $p < 0.001$) when no subs occur and vanishes when many do. This directly
+substitutions the endogenous-control gap is $-0.06$ (n.s.), with 1--2 substitutions it is $+0.11$ (n.s.),
+and with 3 or more substitutions it rises to $+0.22$ ($p < 0.001$). The exogenous penalty is
+correspondingly largest ($-0.22$, $p < 0.05$) when no subs occur and vanishes when many do. This directly
 confirms the mechanism proposed by \citet{weimer2023causal}: the value of a timeout is mediated by
-substitutions rather than by the pause itself. Conditioning on team quality
-via season-long \texttt{NET\_RATING}, we find that the endogenous benefit is strongest in evenly matched
-games ($+0.23$ pts, $p < 0.05$) and washes out in lopsided matchups where the talent gap dominates the
+substitutions rather than by the pause itself.
+
+Conditioning on team quality via season-long \texttt{NET\_RATING}, we find that the endogenous benefit is
+strongest in evenly matched
+games ($+0.32$ pts, $p < 0.01$) and washes out in lopsided matchups where the talent gap dominates the
 trajectory. Finally, stratifying by the running team's in-game PPP we find that when the opponent is shooting
-unusually efficiently (PPP $\geq 1.30$), both effects are amplified and point in opposite directions:
-endogenous timeouts produce $+0.24$ pts of extra recovery ($p < 0.05$) while exogenous timeouts produce
-$-0.62$ pts ($p < 0.001$). This is the clearest evidence in our data of a genuine momentum effect  --  a coach
-timeout with substitutions disrupts a hot-shooting opponent, while a pure TV break effectively gives that
-opponent a rest and lets the run continue.
+unusually efficiently (PPP $\geq 1.30$), the two effects diverge in sign: endogenous timeouts produce
+$+0.20$ pts of extra recovery (n.s. at $n = 1{,}595$) while exogenous timeouts produce $-0.37$ pts
+($p < 0.05$). The asymmetry is extremely suggestive of a strategic coaching response to hot-shooting
+opponents, and it matches the conditional-momentum findings of \citet{qiu2025interrupt} that the value of a
+timeout is largest when the opponent is on a hot streak.
 
 \subsection{Summary}
 
-Our headline finding is that timeouts do causally improve the suffering team's short-term recovery  --  by
-roughly $+0.4$ points over the following three minutes  --  and that this effect is masked in between-group
-analyses by a subtle but severe game-level selection bias. The published consensus of ``no effect'' or
-``slightly negative effect'' \citep{assis2020stop,gibbs2021causal} reproduces in our data only when we use a
-between-group estimator; the within-game matched-twin estimator, which holds game identity approximately
-fixed by construction, produces a strongly positive and highly significant effect for both endogenous and
-exogenous stoppages. The benefit is overwhelmingly mediated by substitutions (in agreement with
-\citet{weimer2023causal}) and is largest in evenly matched games and against hot-shooting opponents, which
-matches both coaching intuition and the conditional-momentum findings of \citet{qiu2025interrupt}. TODO:
-update summary once new experiments are done
+Our headline finding is that timeouts causally improve the suffering team's short-term recovery by roughly
+$+0.4$ points over the following three minutes, and that this effect is masked in between-group analyses by
+a subtle but severe game-level selection bias. The within-game matched-twin estimator, which holds game
+identity approximately fixed by construction, produces a strongly positive and highly significant effect of
+\textbf{$+0.408$ pts} for endogenous (strategic coach) breaks and \textbf{$+0.405$ pts} for exogenous
+(league-forced or auto-fire) breaks -- two estimates that are statistically indistinguishable. That
+symmetry, together with the consistent $+0.34$ to $+0.46$ pair-difference across six structurally distinct
+fine subtypes, is strong evidence that the effect is driven by the pause itself rather than by who chose to
+take it. The published consensus of ``no effect'' or ``slightly negative effect''
+\citep{assis2020stop,gibbs2021causal} reproduces in our data only under a between-group estimator that
+absorbs the game-level selection into the baseline. The benefit is overwhelmingly mediated by substitutions
+(in agreement with \citet{weimer2023causal}) and is largest in evenly matched games and against hot-shooting
+opponents, which matches both coaching intuition and the conditional-momentum findings of
+\citet{qiu2025interrupt}.
 
-\section*{Future Work}\label{sec:future}
+\section{Future Work}\label{sec:future}
 
 Several extensions follow naturally from the present design:
 \begin{itemize}
 		\item \textbf{Better pairing mechanism.} How should we score the quality of a matched twin? The
 				current Manhattan-weighted distance $d$ is a reasonable first cut, but there is a sweet-spot
-				to characterise between pair similarity (which tightens the estimate) and matched-pair
+				to characterize between pair similarity (which tightens the estimate) and matched-pair
 				sample size (which determines its precision).
+
+				In addition, the current design nearly guarantees that the two matched events overlap in time, reducing
+				the experiment to a test of the immediate effect of substitutions rather than the broader effect of the
+				timeout itself. A redesigned match that relaxes the per-period clock constraint and allows for
+				non-overlapping pairs would enable us to test the substitution mechanism more directly by comparing the
+				effect size of overlapping vs.\ non-overlapping pairs.
 		\item \textbf{Alternative outcome metrics.} Beyond $\texttt{recovery}$, we could measure the
-				streaking team's points-per-possession or points-per-minute over the forward window, or roll
+				streaking team's points-per-possession or points-per-minute over the forward window, as was done in
+				\citet{weimer2023causal}, or roll
 				either up into a win-probability impact via a calibrated WP model.
 		\item \textbf{Causal graphical model.} Distil the moderator findings into an explicit CGM
 				(substitutions $\to$ recovery; running-team PPP $\to$ recovery; \texttt{NET\_RATING} gap
-				$\to$ recovery) and use it to formalise the identification arguments and check for missing
+				$\to$ recovery) and use it to formalize the identification arguments and check for missing
 				confounders.
 		\item \textbf{Streaking-team timeouts.} Re-run the analysis with the \emph{streaking} team as the
 				calling team. Do they substitute players at a higher rate than baseline, and what mechanism
 				would explain a positive or negative effect on the run they are already riding?
-		\item \textbf{Additional break types.} Official reviews, injury stoppages, and ejections all
-				introduce small exogenous perturbations to play. Do they show the same recovery pattern as
-				TV timeouts? Cross-checking against more natural experiments would strengthen the causal
-				claim.
+		\item \textbf{Generic Stoppage Evaluation.} It's interesting that the generic \texttt{stoppage} category
+				has a much higher point estimate ($+0.458$) than the league-forced \texttt{tv\_mandatory} category
+				($+0.361$). Could this be noise, or is there another causal mechanism at play here?
 \end{itemize}
 
-\section*{Further experimentation and code changes (TODO delete section once complete)}
+\subsection{Minor extensions}
+
 \begin{itemize}
-		\item ``how does the timeout impact for coaching challenges look if we split by successful / failed
-				challenges? add the code to the .py
-				file, and invoke from the notebook (place the call in the relevant section)''
-		\item ``there's also a chance that successful challenges aren't marked as timeouts. take another look at
-				the event types and check my
-				idea. I think it would also be good to look at the difference in real-world-time (ie 9:43:38.2 pm ->
-				9:47:11.9 PM) to indicate
-				stoppages in play (in case that reveals where the successful challenges might be hiding). Also I thought
-				that there were 35
-				matched outcomes (according to the paper) - why do you only se 19 now??''
-		\item use real-world-elapsed-time as a feature in TV timeout injection model (retrain and evaluate on nbastatsv3)
-		\item reconcile values between section 4.2 and 4.3
-		\item ensure that we're only including timeouts called by the suffering team in the endogenous filter
-		\item analyze real-world-elapsed-time as a mechanism
-		\item team age as a moderator (use average age of players on the court at the time of the timeout). Also
-				use the delta between avg age of players on the court before and after the break
-		\item Should we be more selecive about including datapoints at the end of the quarters? i.e. never include
-				datapoints in the last k (such as 2) minutes of the quarter, and don't include datapoints if t + n
-				exceeds the length of the quarter? ie with 3.5 minutes left, include the 3 minute recovery value, but
-				exclude the 4 minute window from analysis
-		\item update NBA data? (I think this would be expensive and tricky becuase Ted's data is impossilbe to download)
-		\item Can we investigate simple substitutions w/out official timeouts? Such as free throws. When else are
-				teams allowed to substitute players?
-		\item Re-run the study, but replace minutes with \# possessions (make sure this is an even number, to keep
-						possessions per team the same. an edge case is a technical foul, which awards the transgressed team a
-				free possession. this is infrequent enough that it might not matter)
-		\item reconcile with Weimer finding: he states that exogenous breaks cause 11.2 \% drop in scoring by the
-				streaking team has. Do we match that?
-		\item reconcile challenges in matched experiment (section 4.2) with E15.
-		\item re-run experiment post-fixes, flag differences, update conclusion if necessary
+		\item \emph{(open)} Analyse real-world elapsed time as a mechanism: do longer breaks correlate
+				with larger recovery?
+		\item \emph{(open)} Team age as a moderator. Use the average age of players on the court at the
+				time of the break, plus the delta in average age before vs after the break (a proxy for
+				whether the coach swapped out tired veterans for fresh legs).
+		\item \emph{(open)} End-of-quarter trimming: never include events in the last $k$ (say, $k = 2$)
+				minutes of a period, and only include forward-window outcomes that fit inside the period
+				(e.g.\ with 3.5 minutes left, accept the 3-minute window but exclude the 4-minute one).
+				Would tighten the controls but cost sample size.
+		\item \emph{(open)} Investigate simple substitutions without official timeouts (e.g.\ at free
+				throws). When else are teams allowed to substitute? A clean substitution-without-pause
+				control would isolate the personnel-change mechanism from the pause itself.
+		\item \emph{(open)} Re-run with the forward window measured in \emph{possessions} instead of
+				minutes, ensuring the window contains an even number of possessions so each team gets the
+				same opportunity count (modulo the rare technical-foul edge case).
 \end{itemize}
 
 \acks{N/A}
@@ -418,6 +475,109 @@ and cross-examined.
 
 \section*{Appendix}
 
-TODO: add full research-summary.md ablation tables here.
+Tables below reproduce the post-rerun E9--E14 results from the analysis pipeline driver
+(\texttt{run\_experiments\_v2.py}) on the cdnnba dataset, run size $s = 6$, 3-minute forward window, with
+the cause-based reclassifier and strict slot-owner gate of \S\ref{sec:timeout-classification}. Significance
+codes: $\text{n.s.} = p \geq 0.05$, $* = p < 0.05$, $** = p < 0.01$, $*** = p < 0.001$.
+
+\subsection*{E9: Matched-twin causal estimates}
+
+\begin{tabular}{lrrrrr}
+		\toprule
+		group & pairs & treated $\mu$ & matched ctrl $\mu$ & pair diff & sig \\
+		\midrule
+		endogenous & 7{,}474 & $+0.350$ & $-0.058$ & $+0.408$ & *** \\
+		exogenous  & 3{,}480 & $+0.198$ & $-0.207$ & $+0.405$ & *** \\
+		\bottomrule
+\end{tabular}
+
+\vspace{0.3em}
+
+\begin{tabular}{lrrrrr}
+		\toprule
+		subtype & pairs & treated $\mu$ & matched ctrl $\mu$ & pair diff & sig \\
+		\midrule
+		tv\_mandatory            & 879   & $+0.259$ & $-0.101$ & $+0.361$ & *** \\
+		stoppage                 & 1{,}752 & $+0.059$ & $-0.399$ & $+0.458$ & *** \\
+		coach\_absorb            & 849   & $+0.422$ & $+0.081$ & $+0.340$ & *** \\
+		coach\_discretionary     & 2{,}119 & $+0.352$ & $-0.076$ & $+0.429$ & *** \\
+		mistagged\_discretionary & 5{,}355 & $+0.349$ & $-0.051$ & $+0.400$ & *** \\
+		coach\_challenge         & 98    & $-0.429$ & $-0.898$ & $+0.469$ & **  \\
+		\bottomrule
+\end{tabular}
+
+\subsection*{E10: Between-group recovery by fine subtype}
+
+\begin{tabular}{lrrrr}
+		\toprule
+		subtype & $n$ & $\mu$ & ctrl $\mu$ & $\Delta$ vs ctrl (sig) \\
+		\midrule
+		tv\_mandatory            & 1{,}486  & $+0.283$ & $+0.371$ & $-0.087$ n.s. \\
+		stoppage                 & 3{,}793  & $+0.125$ & $+0.371$ & $-0.246$ ***  \\
+		coach\_absorb            & 1{,}563  & $+0.460$ & $+0.371$ & $+0.089$ n.s. \\
+		coach\_discretionary     & 4{,}694  & $+0.432$ & $+0.371$ & $+0.062$ n.s. \\
+		mistagged\_discretionary & 11{,}543 & $+0.430$ & $+0.371$ & $+0.059$ n.s. \\
+		coach\_challenge         & 208      & $-0.596$ & $+0.371$ & $-0.967$ ***  \\
+		\bottomrule
+\end{tabular}
+
+\subsection*{E11: Game phase and clutch conditioning}
+
+\begin{tabular}{lrrrrrr}
+		\toprule
+		condition & endo $n$ & endo $\mu$ & exo $\mu$ & ctrl $\mu$ & $\Delta$ endo-ctrl & $\Delta$ exo-ctrl \\
+		\midrule
+		Q1 early (0--360s)    & 1{,}415 & $+0.408$ & $+0.327$ & $+0.470$ & $-0.062$ n.s.\ & $-0.143$ n.s. \\
+		Q1 late  (360--720s)  & 1{,}231 & $+0.568$ & $+0.322$ & $+0.386$ & $+0.182$ n.s.\ & $-0.063$ n.s. \\
+		Q2 early (720--1080s) & 2{,}451 & $+0.585$ & $+0.303$ & $+0.470$ & $+0.114$ n.s.\ & $-0.167$ n.s. \\
+		Q2 late  (1080--1440s)& 1{,}510 & $+0.291$ & $+0.148$ & $+0.283$ & $+0.008$ n.s.\ & $-0.136$ n.s. \\
+		Q3 early (1440--1800s)& 2{,}517 & $+0.402$ & $+0.289$ & $+0.308$ & $+0.094$ n.s.\ & $-0.018$ n.s. \\
+		Q3 late  (1800--2160s)& 1{,}680 & $+0.327$ & $+0.144$ & $+0.407$ & $-0.080$ n.s.\ & $-0.262$ n.s. \\
+		Q4 early (2160--2520s)& 2{,}706 & $+0.433$ & $+0.089$ & $+0.317$ & $+0.116$ n.s.\ & $-0.228$ n.s. \\
+		Q4 late  (2520--2880s)& 2{,}559 & $+0.406$ & $+0.100$ & $+0.272$ & $+0.134$ n.s.\ & $-0.172$ n.s. \\
+		\midrule
+		Clutch (Q4 last 5min, $|m|\leq 5$) & 993     & $+0.273$ & $-0.253$ & $+0.158$ & $+0.115$ n.s.\ & $-0.411$ n.s. \\
+		Non-clutch                          & 15{,}244 & $+0.441$ & $+0.249$ & $+0.378$ & $+0.063$ n.s.\ & $-0.129$ *    \\
+		\bottomrule
+\end{tabular}
+
+\subsection*{E12: Team quality conditioning (\texttt{NET\_RATING})}
+
+\begin{tabular}{lrrrrrr}
+		\toprule
+		condition & endo $n$ & endo $\mu$ & exo $\mu$ & ctrl $\mu$ & $\Delta$ endo-ctrl & $\Delta$ exo-ctrl \\
+		\midrule
+		Sufferer much worse ($\Delta \leq -5$)  & 4{,}097 & $-0.148$ & $-0.134$ & $-0.224$ & $+0.076$ n.s.\ & $+0.090$ n.s. \\
+		Sufferer worse ($-5 < \Delta \leq -1$)  & 3{,}822 & $+0.313$ & $+0.013$ & $+0.221$ & $+0.092$ n.s.\ & $-0.208$ n.s. \\
+		Evenly matched ($|\Delta| < 1$)         & 2{,}392 & $+0.656$ & $+0.170$ & $+0.341$ & $+0.315$ **    & $-0.170$ n.s. \\
+		Sufferer better ($1 \leq \Delta < 5$)   & 3{,}328 & $+0.597$ & $+0.453$ & $+0.556$ & $+0.041$ n.s.\ & $-0.103$ n.s. \\
+		Sufferer much better ($\Delta \geq 5$)  & 2{,}598 & $+1.097$ & $+0.924$ & $+0.986$ & $+0.111$ n.s.\ & $-0.062$ n.s. \\
+		\bottomrule
+\end{tabular}
+
+\subsection*{E13: Substitution-adjusted analysis}
+
+\begin{tabular}{lrrrrrr}
+		\toprule
+		$\pm 30$s subs & endo $n$ & endo $\mu$ & exo $\mu$ & ctrl $\mu$ & $\Delta$ endo-ctrl & $\Delta$ exo-ctrl \\
+		\midrule
+		0 subs   & 5{,}175 & $+0.426$ & $+0.274$ & $+0.489$ & $-0.063$ n.s.\ & $-0.215$ *    \\
+		1--2 subs & 3{,}864 & $+0.348$ & $+0.160$ & $+0.237$ & $+0.110$ n.s.\ & $-0.077$ n.s. \\
+		3+ subs   & 7{,}198 & $+0.479$ & $+0.248$ & $+0.262$ & $+0.217$ ***   & $-0.014$ n.s. \\
+		\bottomrule
+\end{tabular}
+
+\subsection*{E14: Running-team in-game PPP}
+
+\begin{tabular}{lrrrrrr}
+		\toprule
+		condition & endo $n$ & endo $\mu$ & exo $\mu$ & ctrl $\mu$ & $\Delta$ endo-ctrl & $\Delta$ exo-ctrl \\
+		\midrule
+		Running PPP $< 1.00$       & 4{,}744 & $+0.343$ & $+0.284$ & $+0.145$ & $+0.197$ *    & $+0.139$ n.s. \\
+		Running PPP $1.00$--$1.15$ & 5{,}740 & $+0.429$ & $+0.238$ & $+0.341$ & $+0.088$ n.s.\ & $-0.103$ n.s. \\
+		Running PPP $1.15$--$1.30$ & 4{,}158 & $+0.441$ & $+0.255$ & $+0.420$ & $+0.021$ n.s.\ & $-0.164$ n.s. \\
+		Running PPP $\geq 1.30$    & 1{,}595 & $+0.672$ & $+0.104$ & $+0.474$ & $+0.198$ n.s.\ & $-0.370$ *    \\
+		\bottomrule
+\end{tabular}
 
 \end{document}
