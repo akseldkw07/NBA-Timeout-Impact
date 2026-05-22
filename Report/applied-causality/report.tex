@@ -410,6 +410,12 @@ Several extensions follow naturally from the present design:
 				current Manhattan-weighted distance $d$ is a reasonable first cut, but there is a sweet-spot
 				to characterize between pair similarity (which tightens the estimate) and matched-pair
 				sample size (which determines its precision).
+
+				In addition, the current design nearly guarantees that the two matched events overlap in time, reducing
+				the experiment to a test of the immediate effect of substitutions rather than the broader effect of the
+				timeout itself. A redesigned match that relaxes the per-period clock constraint and allows for
+				non-overlapping pairs would enable us to test the substitution mechanism more directly by comparing the
+				effect size of overlapping vs.\ non-overlapping pairs.
 		\item \textbf{Alternative outcome metrics.} Beyond $\texttt{recovery}$, we could measure the
 				streaking team's points-per-possession or points-per-minute over the forward window, as was done in
 				\citet{weimer2023causal}, or roll
@@ -430,8 +436,7 @@ Several extensions follow naturally from the present design:
 
 \begin{itemize}
 		\item \emph{(open)} Analyse real-world elapsed time as a mechanism: do longer breaks correlate
-				with larger recovery? \texttt{timeout\_duration\_s} is persisted on the dataset and this is
-				a one-cell experiment.
+				with larger recovery?
 		\item \emph{(open)} Team age as a moderator. Use the average age of players on the court at the
 				time of the break, plus the delta in average age before vs after the break (a proxy for
 				whether the coach swapped out tired veterans for fresh legs).
